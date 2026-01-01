@@ -57,6 +57,8 @@ async function pollHBD(
   const lastId = await getLastId(restaurant.id, 'HBD');
   const memoFilter = restaurant.memoFilters.HBD || '%TABLE %';
 
+  console.log(`[HBD] Polling for restaurant '${restaurant.id}' account='${account}' lastId='${lastId}' memoFilter='${memoFilter}'`);
+
   const result = await hafPool.query(
     `SELECT id, from_account, amount, symbol, memo
      FROM hafsql.operation_transfer_table
@@ -69,12 +71,15 @@ async function pollHBD(
     [account, memoFilter, lastId]
   );
 
+  console.log(`[HBD] Found ${result.rows.length} new transfers for restaurant='${restaurant.id}' account='${account}'`);
+
   if (result.rows.length === 0) {
     return [];
   }
 
   // Update last processed ID
   await setLastId(restaurant.id, 'HBD', result.rows[0].id.toString());
+  console.log(`[HBD] Updated lastId to ${result.rows[0].id.toString()} for ${restaurant.id}`);
 
   // Transform rows to Transfer objects
   const transfers: Transfer[] = result.rows.map((row) => ({
@@ -88,7 +93,6 @@ async function pollHBD(
     received_at: new Date().toISOString(), // Server time (limitation: not blockchain time)
   }));
 
-  console.log(`[HBD] Found ${transfers.length} new transfers for ${restaurant.id}`);
   return transfers;
 }
 
@@ -102,6 +106,8 @@ async function pollHiveEngineToken(
 ): Promise<Transfer[]> {
   const lastId = await getLastId(restaurant.id, symbol);
   const memoFilter = restaurant.memoFilters[symbol] || '%TABLE %';
+
+  console.log(`[${symbol}] Polling for restaurant '${restaurant.id}' account='${account}' lastId='${lastId}' memoFilter='${memoFilter}'`);
 
   const client = await hafPool.connect();
 
@@ -193,9 +199,10 @@ async function pollHiveEngineToken(
     // Update last processed ID
     if (result.rows.length > 0) {
       await setLastId(restaurant.id, symbol, result.rows[0].id.toString());
+      console.log(`[${symbol}] Updated lastId to ${result.rows[0].id.toString()} for ${restaurant.id}`);
     }
 
-    console.log(`[${symbol}] Found ${transfers.length} new transfers for ${restaurant.id}`);
+    console.log(`[${symbol}] Found ${transfers.length} new transfers for restaurant='${restaurant.id}' account='${account}'`);
     return transfers;
   } finally {
     client.release();

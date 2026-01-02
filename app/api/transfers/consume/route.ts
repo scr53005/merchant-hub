@@ -63,8 +63,8 @@ export async function GET(request: NextRequest) {
     // Ensure consumer group exists
     // Try to create it; if it already exists, ignore the error
     try {
-      // Use raw Redis command via call()
-      await (redis as any).call('XGROUP', 'CREATE', streamKey, groupName, '0', 'MKSTREAM');
+      // Upstash SDK: xgroup(subcommand, key, groupName, id, options)
+      await redis.xgroup('CREATE', streamKey, groupName, '0', { MKSTREAM: true });
       console.log(`[CONSUME] Created consumer group '${groupName}' for ${streamKey}`);
     } catch (error: any) {
       // Group already exists (error: BUSYGROUP) - this is fine
@@ -75,52 +75,47 @@ export async function GET(request: NextRequest) {
 
     // Read new messages using consumer group
     // '>' means "only new messages that haven't been delivered to any consumer"
-    // Use raw Redis command for XREADGROUP
-    const result = await (redis as any).call(
-      'XREADGROUP',
-      'GROUP',
+    // Upstash SDK: xreadgroup(group, consumer, streams, options)
+    const result = await redis.xreadgroup(
       groupName,
       consumerId,
-      'COUNT',
-      count.toString(),
-      'STREAMS',
-      streamKey,
-      '>'
-    ) as any;
+      { [streamKey]: '>' },
+      { count }
+    );
 
     if (!result || result.length === 0) {
       console.log(`[CONSUME] No new transfers for consumer '${consumerId}' in ${streamKey}`);
 
-      // Also check for pending messages (messages read but not ACKed)
-      const pendingResult = await (redis as any).call('XPENDING', streamKey, groupName, '-', '+', count.toString()) as any;
-
-      if (pendingResult && pendingResult.length > 0) {
-        console.log(`[CONSUME] Found ${pendingResult.length} pending (unacknowledged) messages`);
-        // Note: In a real implementation, you might want to claim these with XAUTOCLAIM
-        // For now, just log them
+      // Check for pending messages count
+      let pendingCount = 0;
+      try {
+        const pendingInfo = await redis.xpending(streamKey, groupName);
+        pendingCount = pendingInfo?.pending || 0;
+        if (pendingCount > 0) {
+          console.log(`[CONSUME] Found ${pendingCount} pending (unacknowledged) messages`);
+        }
+      } catch {
+        // Ignore errors checking pending
       }
 
       return NextResponse.json(
-        { transfers: [], pending: pendingResult?.length || 0 },
+        { transfers: [], pending: pendingCount },
         { headers: getCorsHeaders(request) }
       );
     }
 
-    // Parse Redis Stream response
-    // result format: [[streamKey, [[id, fields], [id, fields], ...]]]
+    // Parse Upstash xreadgroup response
+    // result format: [{ name: streamKey, messages: [{ id, field1, field2, ... }] }]
     const streamData = result[0];
-    const entries = streamData[1];
+    const messages = streamData.messages || [];
 
-    const transfers = entries.map(([messageId, fields]: [string, string[]]) => {
-      // fields is an array like ['field1', 'value1', 'field2', 'value2', ...]
-      const obj: any = {
-        messageId, // Redis Stream message ID (needed for ACK)
-        streamId: messageId, // Alias for clarity
+    const transfers = messages.map((msg: any) => {
+      const { id, ...fields } = msg;
+      return {
+        messageId: id, // Redis Stream message ID (needed for ACK)
+        streamId: id,  // Alias for clarity
+        ...fields,
       };
-      for (let i = 0; i < fields.length; i += 2) {
-        obj[fields[i]] = fields[i + 1];
-      }
-      return obj;
     });
 
     console.log(`[CONSUME] Delivered ${transfers.length} transfers to consumer '${consumerId}'`);

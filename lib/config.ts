@@ -7,8 +7,8 @@ export const RESTAURANTS: RestaurantConfig[] = [
     id: 'indies',
     name: 'Indies Restaurant',
     accounts: {
-      prod: process.env.INDIES_ACCOUNT || 'indies.cafe',
-      dev: process.env.INDIES_DEV_ACCOUNT || 'indies-test',
+      prod: (process.env.INDIES_ACCOUNT || 'indies.cafe').trim(),
+      dev: (process.env.INDIES_DEV_ACCOUNT || 'indies-test').trim(),
     },
     currencies: ['HBD', 'EURO', 'OCLT'],
     memoFilters: {
@@ -21,8 +21,8 @@ export const RESTAURANTS: RestaurantConfig[] = [
     id: 'croque-bedaine',
     name: 'Le Croque Bedaine',
     accounts: {
-      prod: process.env.CROQUE_ACCOUNT || 'croque.bedaine',
-      dev: process.env.CROQUE_DEV_ACCOUNT || 'croque-test',
+      prod: (process.env.CROQUE_ACCOUNT || 'croque.bedaine').trim(),
+      dev: (process.env.CROQUE_DEV_ACCOUNT || 'croque-test').trim(),
     },
     currencies: ['HBD', 'EURO', 'OCLT'],
     memoFilters: {

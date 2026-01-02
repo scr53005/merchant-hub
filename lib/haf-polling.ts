@@ -35,6 +35,7 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
     }
 
     console.log(`[POLLING] Batched polling for ${accountList.length} accounts (prod+dev): ${accountList.join(', ')}`);
+    console.log(`[POLLING] Account map:`, Array.from(accountToContext.entries()).map(([acc, ctx]) => `${acc}→${ctx.restaurant.id}(${ctx.env})`).join(', '));
 
     // Poll HBD - ONE query for all accounts
     const hbdTransfers = await pollHBDBatched(accountList, accountToContext);
@@ -110,7 +111,7 @@ async function pollHBDBatched(
     const context = accountToContext.get(account);
 
     if (!context) {
-      console.warn(`[HBD BATCHED] Unknown account: ${account}`);
+      console.warn(`[HBD BATCHED] REJECTED - Unknown account: ${account} (transfer ID: ${row.id})`);
       continue;
     }
 
@@ -127,6 +128,7 @@ async function pollHBDBatched(
     const memoFilter = restaurant.memoFilters.HBD || '%TABLE %';
     const memoPattern = memoFilter.replace(/%/g, '');
     if (!row.memo.includes(memoPattern)) {
+      console.warn(`[HBD BATCHED] REJECTED - Memo mismatch for ${account}: pattern="${memoPattern}" memo="${row.memo}" (transfer ID: ${row.id})`);
       continue;
     }
 

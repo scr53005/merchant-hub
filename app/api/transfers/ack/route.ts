@@ -66,7 +66,8 @@ export async function POST(request: NextRequest) {
 
     // Acknowledge all messages
     // XACK returns the number of messages successfully acknowledged
-    const ackCount = await redis.xack(streamKey, groupName, ...messageIds);
+    // Use raw call() to avoid TypeScript tuple type issues with spread
+    const ackCount = await (redis as any).call('XACK', streamKey, groupName, ...messageIds) as number;
 
     console.log(`[ACK] Successfully acknowledged ${ackCount}/${messageIds.length} messages`);
 

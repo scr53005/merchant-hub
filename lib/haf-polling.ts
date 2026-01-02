@@ -3,7 +3,7 @@
 
 import { Pool } from 'pg';
 import { Transfer, RestaurantConfig, Currency } from '@/types';
-import { RESTAURANTS, getRestaurantAccount } from './config';
+import { getAllAccounts } from './config';
 import { getLastId, setLastId, publishTransfer } from './redis';
 
 const hafPool = new Pool({
@@ -13,101 +13,177 @@ const hafPool = new Pool({
 
 /**
  * Main polling function - polls HAF for all restaurants and all currencies
+ * Uses batched queries (ONE query per currency for ALL restaurants)
+ * Queries BOTH prod and dev accounts simultaneously (O(1) scaling makes this negligible)
  * Returns array of detected transfers
  */
 export async function pollAllTransfers(): Promise<Transfer[]> {
   const allTransfers: Transfer[] = [];
 
-  for (const restaurant of RESTAURANTS) {
-    const account = getRestaurantAccount(restaurant);
+  try {
+    // Get ALL accounts (both prod and dev for all restaurants)
+    const accountConfigs = getAllAccounts();
+    const accountToContext = new Map<string, { restaurant: RestaurantConfig; env: 'prod' | 'dev' }>();
+    const accountList: string[] = [];
 
-    for (const currency of restaurant.currencies) {
-      try {
-        let transfers: Transfer[] = [];
-
-        if (currency === 'HBD') {
-          transfers = await pollHBD(restaurant, account);
-        } else if (currency === 'EURO' || currency === 'OCLT') {
-          // EURO and OCLT are both Hive-Engine tokens
-          transfers = await pollHiveEngineToken(restaurant, account, currency);
-        }
-
-        // Publish each transfer to Redis Stream
-        for (const transfer of transfers) {
-          await publishTransfer(restaurant.id, transfer);
-        }
-
-        allTransfers.push(...transfers);
-      } catch (error: any) {
-        console.error(`Error polling ${currency} for ${restaurant.id}:`, error.message);
-      }
+    for (const config of accountConfigs) {
+      accountToContext.set(config.account, {
+        restaurant: config.restaurant,
+        env: config.env
+      });
+      accountList.push(config.account);
     }
+
+    console.log(`[POLLING] Batched polling for ${accountList.length} accounts (prod+dev): ${accountList.join(', ')}`);
+
+    // Poll HBD - ONE query for all accounts
+    const hbdTransfers = await pollHBDBatched(accountList, accountToContext);
+    allTransfers.push(...hbdTransfers);
+
+    // Poll EURO - ONE query for all accounts
+    const euroTransfers = await pollHiveEngineTokenBatched('EURO', accountList, accountToContext);
+    allTransfers.push(...euroTransfers);
+
+    // Poll OCLT - ONE query for all accounts
+    const ocltTransfers = await pollHiveEngineTokenBatched('OCLT', accountList, accountToContext);
+    allTransfers.push(...ocltTransfers);
+
+    // Publish transfers to Redis Streams (grouped by restaurant)
+    // Co pages will filter by account name if they need environment-specific filtering
+    for (const transfer of allTransfers) {
+      await publishTransfer(transfer.restaurant_id, transfer);
+    }
+
+    console.log(`[POLLING] Total transfers found: ${allTransfers.length}`);
+
+  } catch (error: any) {
+    console.error('[POLLING] Error in batched polling:', error.message);
   }
 
   return allTransfers;
 }
 
 /**
- * Poll HBD transfers from hafsql.operation_transfer_table
+ * Poll HBD transfers for ALL restaurants in a single batched query
+ * Uses SQL IN operator to query all accounts at once
  */
-async function pollHBD(
-  restaurant: RestaurantConfig,
-  account: string
+async function pollHBDBatched(
+  allAccounts: string[],
+  accountToContext: Map<string, { restaurant: RestaurantConfig; env: 'prod' | 'dev' }>
 ): Promise<Transfer[]> {
-  const lastId = await getLastId(restaurant.id, 'HBD');
-  const memoFilter = restaurant.memoFilters.HBD || '%TABLE %';
+  if (allAccounts.length === 0) return [];
 
-  console.log(`[HBD] Polling for restaurant '${restaurant.id}' account='${account}' lastId='${lastId}' memoFilter='${memoFilter}'`);
+  // Get lastId for each restaurant (keyed by restaurant_id, not account)
+  const restaurantLastIds = new Map<string, bigint>();
+  let minLastId = BigInt(Number.MAX_SAFE_INTEGER);
 
-  const result = await hafPool.query(
-    `SELECT id, from_account, amount, symbol, memo
-     FROM hafsql.operation_transfer_table
-     WHERE to_account = $1
-       AND symbol = 'HBD'
-       AND memo LIKE $2
-       AND id > $3
-     ORDER BY id DESC
-     LIMIT 10`,
-    [account, memoFilter, lastId]
-  );
-
-  console.log(`[HBD] Found ${result.rows.length} new transfers for restaurant='${restaurant.id}' account='${account}'`);
-
-  if (result.rows.length === 0) {
-    return [];
+  for (const [account, context] of accountToContext) {
+    const lastIdStr = await getLastId(context.restaurant.id, 'HBD');
+    const lastIdBigInt = BigInt(lastIdStr);
+    restaurantLastIds.set(context.restaurant.id, lastIdBigInt);
+    if (lastIdBigInt < minLastId) {
+      minLastId = lastIdBigInt;
+    }
   }
 
-  // Update last processed ID
-  await setLastId(restaurant.id, 'HBD', result.rows[0].id.toString());
-  console.log(`[HBD] Updated lastId to ${result.rows[0].id.toString()} for ${restaurant.id}`);
+  console.log(`[HBD BATCHED] Polling ${allAccounts.length} accounts, minLastId=${minLastId.toString()}`);
 
-  // Transform rows to Transfer objects
-  const transfers: Transfer[] = result.rows.map((row) => ({
-    id: row.id.toString(),
-    restaurant_id: restaurant.id,
-    from_account: row.from_account,
-    amount: row.amount.toString(),
-    symbol: 'HBD',
-    memo: row.memo,
-    parsed_memo: row.memo,
-    received_at: new Date().toISOString(), // Server time (limitation: not blockchain time)
-  }));
+  // Query all accounts at once using ANY operator
+  const result = await hafPool.query(
+    `SELECT id, to_account, from_account, amount, symbol, memo
+     FROM hafsql.operation_transfer_table
+     WHERE to_account = ANY($1)
+       AND symbol = 'HBD'
+       AND id > $2
+     ORDER BY id DESC
+     LIMIT 100`,
+    [allAccounts, minLastId.toString()]
+  );
 
-  return transfers;
+  console.log(`[HBD BATCHED] Query returned ${result.rows.length} raw rows`);
+
+  const allTransfers: Transfer[] = [];
+  const restaurantMaxIds = new Map<string, bigint>();
+
+  for (const row of result.rows) {
+    const account = row.to_account;
+    const context = accountToContext.get(account);
+
+    if (!context) {
+      console.warn(`[HBD BATCHED] Unknown account: ${account}`);
+      continue;
+    }
+
+    const { restaurant } = context;
+    const rowId = BigInt(row.id);
+    const restaurantLastId = restaurantLastIds.get(restaurant.id) || BigInt(0);
+
+    // Filter: only include if id > restaurant's lastId
+    if (rowId <= restaurantLastId) {
+      continue;
+    }
+
+    // Check memo filter for this restaurant
+    const memoFilter = restaurant.memoFilters.HBD || '%TABLE %';
+    const memoPattern = memoFilter.replace(/%/g, '');
+    if (!row.memo.includes(memoPattern)) {
+      continue;
+    }
+
+    // Track max ID for this restaurant
+    const currentMax = restaurantMaxIds.get(restaurant.id) || BigInt(0);
+    if (rowId > currentMax) {
+      restaurantMaxIds.set(restaurant.id, rowId);
+    }
+
+    allTransfers.push({
+      id: row.id.toString(),
+      restaurant_id: restaurant.id,
+      account: account, // Include account for environment filtering in co pages
+      from_account: row.from_account,
+      amount: row.amount.toString(),
+      symbol: 'HBD',
+      memo: row.memo,
+      parsed_memo: row.memo,
+      received_at: new Date().toISOString(),
+    });
+  }
+
+  // Update lastId for each restaurant that received transfers
+  for (const [restaurantId, maxId] of restaurantMaxIds) {
+    await setLastId(restaurantId, 'HBD', maxId.toString());
+    console.log(`[HBD BATCHED] Updated lastId to ${maxId.toString()} for ${restaurantId}`);
+  }
+
+  console.log(`[HBD BATCHED] Found ${allTransfers.length} transfers across ${restaurantMaxIds.size} restaurants`);
+  return allTransfers;
 }
 
 /**
- * Poll Hive-Engine tokens (EURO, OCLT) from hafsql.operation_custom_json_view
+ * Poll Hive-Engine tokens (EURO, OCLT) for ALL restaurants in a single batched query
+ * Uses block range and filters in application code for each restaurant
  */
-async function pollHiveEngineToken(
-  restaurant: RestaurantConfig,
-  account: string,
-  symbol: 'EURO' | 'OCLT'
+async function pollHiveEngineTokenBatched(
+  symbol: 'EURO' | 'OCLT',
+  allAccounts: string[],
+  accountToContext: Map<string, { restaurant: RestaurantConfig; env: 'prod' | 'dev' }>
 ): Promise<Transfer[]> {
-  const lastId = await getLastId(restaurant.id, symbol);
-  const memoFilter = restaurant.memoFilters[symbol] || '%TABLE %';
+  if (allAccounts.length === 0) return [];
 
-  console.log(`[${symbol}] Polling for restaurant '${restaurant.id}' account='${account}' lastId='${lastId}' memoFilter='${memoFilter}'`);
+  // Get lastId for each restaurant (keyed by restaurant_id, not account)
+  const restaurantLastIds = new Map<string, bigint>();
+  let minLastId = BigInt(Number.MAX_SAFE_INTEGER);
+
+  for (const [account, context] of accountToContext) {
+    const lastIdStr = await getLastId(context.restaurant.id, symbol);
+    const lastIdBigInt = BigInt(lastIdStr);
+    restaurantLastIds.set(context.restaurant.id, lastIdBigInt);
+    if (lastIdBigInt < minLastId) {
+      minLastId = lastIdBigInt;
+    }
+  }
+
+  console.log(`[${symbol} BATCHED] Polling ${allAccounts.length} accounts, minLastId=${minLastId.toString()}`);
 
   const client = await hafPool.connect();
 
@@ -125,7 +201,7 @@ async function pollHiveEngineToken(
     const currentBlock = blockQuery.rows[0]?.block_num || 101140000;
     const startBlock = currentBlock - 10000; // Search last ~10k blocks (≈8 hours)
 
-    // Query custom_json operations
+    // Query custom_json operations for ALL restaurants at once
     const result = await client.query(
       `SELECT id, timestamp AT TIME ZONE 'UTC' as timestamp, required_auths, json, block_num
        FROM hafsql.operation_custom_json_view
@@ -133,15 +209,18 @@ async function pollHiveEngineToken(
          AND custom_id = 'ssc-mainnet-hive'
          AND id > $3
        ORDER BY block_num DESC
-       LIMIT 500`,
-      [startBlock, currentBlock, lastId]
+       LIMIT 1000`,
+      [startBlock, currentBlock, minLastId.toString()]
     );
+
+    console.log(`[${symbol} BATCHED] Query returned ${result.rows.length} raw custom_json rows`);
 
     if (result.rows.length === 0) {
       return [];
     }
 
-    const transfers: Transfer[] = [];
+    const allTransfers: Transfer[] = [];
+    const restaurantMaxIds = new Map<string, bigint>();
 
     for (const row of result.rows) {
       // Parse JSON
@@ -149,23 +228,42 @@ async function pollHiveEngineToken(
       try {
         jsonData = typeof row.json === 'string' ? JSON.parse(row.json) : row.json;
       } catch (e) {
-        console.error('Error parsing JSON:', e);
+        console.error(`[${symbol} BATCHED] Error parsing JSON:`, e);
         continue;
       }
 
-      // Extract memo
-      const memoRaw = jsonData.contractPayload?.memo;
-      const memoString = typeof memoRaw === 'string' ? memoRaw : (memoRaw ? JSON.stringify(memoRaw) : '');
-
-      // Filter: only token transfers to our account with matching symbol
+      // Filter: only token transfers with matching symbol
       if (
         jsonData.contractName !== 'tokens' ||
         jsonData.contractAction !== 'transfer' ||
-        jsonData.contractPayload?.symbol !== symbol ||
-        jsonData.contractPayload?.to !== account ||
-        !memoString.includes(memoFilter.replace('%', ''))
+        jsonData.contractPayload?.symbol !== symbol
       ) {
-        continue; // Skip this row
+        continue;
+      }
+
+      const toAccount = jsonData.contractPayload?.to;
+      if (!toAccount || !accountToContext.has(toAccount)) {
+        continue; // Not for any of our restaurants
+      }
+
+      const context = accountToContext.get(toAccount)!;
+      const { restaurant } = context;
+      const rowId = BigInt(row.id);
+      const restaurantLastId = restaurantLastIds.get(restaurant.id) || BigInt(0);
+
+      // Filter: only include if id > restaurant's lastId
+      if (rowId <= restaurantLastId) {
+        continue;
+      }
+
+      // Extract and check memo
+      const memoRaw = jsonData.contractPayload?.memo;
+      const memoString = typeof memoRaw === 'string' ? memoRaw : (memoRaw ? JSON.stringify(memoRaw) : '');
+      const memoFilter = restaurant.memoFilters[symbol] || '%TABLE %';
+      const memoPattern = memoFilter.replace(/%/g, '');
+
+      if (!memoString.includes(memoPattern)) {
+        continue; // Memo doesn't match restaurant's filter
       }
 
       // Parse from_account from required_auths
@@ -178,14 +276,21 @@ async function pollHiveEngineToken(
           fromAccount = authsArray[0];
         }
       } catch (e) {
-        console.error('Error parsing required_auths:', e);
+        console.error(`[${symbol} BATCHED] Error parsing required_auths:`, e);
       }
 
       const quantity = jsonData.contractPayload?.quantity || '0';
 
-      transfers.push({
+      // Track max ID for this restaurant
+      const currentMax = restaurantMaxIds.get(restaurant.id) || BigInt(0);
+      if (rowId > currentMax) {
+        restaurantMaxIds.set(restaurant.id, rowId);
+      }
+
+      allTransfers.push({
         id: row.id.toString(),
         restaurant_id: restaurant.id,
+        account: toAccount, // Include account for environment filtering in co pages
         from_account: fromAccount,
         amount: quantity,
         symbol: symbol,
@@ -196,14 +301,14 @@ async function pollHiveEngineToken(
       });
     }
 
-    // Update last processed ID
-    if (result.rows.length > 0) {
-      await setLastId(restaurant.id, symbol, result.rows[0].id.toString());
-      console.log(`[${symbol}] Updated lastId to ${result.rows[0].id.toString()} for ${restaurant.id}`);
+    // Update lastId for each restaurant that received transfers
+    for (const [restaurantId, maxId] of restaurantMaxIds) {
+      await setLastId(restaurantId, symbol, maxId.toString());
+      console.log(`[${symbol} BATCHED] Updated lastId to ${maxId.toString()} for ${restaurantId}`);
     }
 
-    console.log(`[${symbol}] Found ${transfers.length} new transfers for restaurant='${restaurant.id}' account='${account}'`);
-    return transfers;
+    console.log(`[${symbol} BATCHED] Found ${allTransfers.length} transfers across ${restaurantMaxIds.size} restaurants`);
+    return allTransfers;
   } finally {
     client.release();
   }

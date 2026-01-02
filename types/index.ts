@@ -18,6 +18,7 @@ export type Currency = 'HBD' | 'EURO' | 'HIVE' | 'OCLT';
 export interface Transfer {
   id: string;
   restaurant_id: string;
+  account: string; // The Hive account that received the transfer (e.g., 'indies.cafe' or 'indies-test')
   from_account: string;
   amount: string;
   symbol: Currency;

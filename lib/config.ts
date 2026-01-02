@@ -40,6 +40,27 @@ export function getRestaurantAccount(restaurant: RestaurantConfig): string {
     : restaurant.accounts.dev;
 }
 
+// Get ALL accounts (both prod and dev) for batched polling
+// Since we're using O(1) batched queries, querying all accounts has negligible cost
+export function getAllAccounts(): { account: string; restaurant: RestaurantConfig; env: 'prod' | 'dev' }[] {
+  const allAccounts: { account: string; restaurant: RestaurantConfig; env: 'prod' | 'dev' }[] = [];
+
+  for (const restaurant of RESTAURANTS) {
+    allAccounts.push({
+      account: restaurant.accounts.prod,
+      restaurant,
+      env: 'prod'
+    });
+    allAccounts.push({
+      account: restaurant.accounts.dev,
+      restaurant,
+      env: 'dev'
+    });
+  }
+
+  return allAccounts;
+}
+
 // Polling configuration
 export const POLLING_CONFIG = {
   INTERVAL_ACTIVE: 6000, // 6 seconds when shops are open

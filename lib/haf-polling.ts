@@ -23,6 +23,8 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
   try {
     // Get ALL accounts (both prod and dev for all restaurants)
     const accountConfigs = getAllAccounts();
+    console.log(`[POLLING] getAllAccounts() returned:`, JSON.stringify(accountConfigs.map(c => ({ account: c.account, restaurant: c.restaurant.id, env: c.env }))));
+
     const accountToContext = new Map<string, { restaurant: RestaurantConfig; env: 'prod' | 'dev' }>();
     const accountList: string[] = [];
 
@@ -91,6 +93,10 @@ async function pollHBDBatched(
   console.log(`[HBD BATCHED] Account lastIds:`, Array.from(accountLastIds.entries()).map(([acc, lastId]) => `${acc}=${lastId.toString()}`).join(', '));
 
   // Query all accounts at once using ANY operator
+  const accountsArrayLiteral = `ARRAY['${allAccounts.join("','")}']`;
+  const sqlStatement = `SELECT id, to_account, from_account, amount, symbol, memo FROM hafsql.operation_transfer_table WHERE to_account = ANY(${accountsArrayLiteral}) AND symbol = 'HBD' AND id > ${minLastId.toString()} ORDER BY id DESC LIMIT 100`;
+  console.warn(`[HBD BATCHED] EXACT SQL: ${sqlStatement}`);
+
   const result = await hafPool.query(
     `SELECT id, to_account, from_account, amount, symbol, memo
      FROM hafsql.operation_transfer_table
@@ -103,6 +109,9 @@ async function pollHBDBatched(
   );
 
   console.log(`[HBD BATCHED] Query returned ${result.rows.length} raw rows`);
+  if (result.rows.length > 0) {
+    console.log(`[HBD BATCHED] Raw rows:`, result.rows.map(r => `id=${r.id} to=${r.to_account} from=${r.from_account} memo="${r.memo.substring(0, 50)}..."`).join(' | '));
+  }
 
   const allTransfers: Transfer[] = [];
   const accountMaxIds = new Map<string, bigint>();

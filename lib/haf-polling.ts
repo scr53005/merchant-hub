@@ -74,21 +74,21 @@ async function pollHBDBatched(
 ): Promise<Transfer[]> {
   if (allAccounts.length === 0) return [];
 
-  // Get lastId for each restaurant (keyed by restaurant_id, not account)
-  const restaurantLastIds = new Map<string, bigint>();
+  // Get lastId for each ACCOUNT (not restaurant) to properly handle prod/dev separately
+  const accountLastIds = new Map<string, bigint>();
   let minLastId = BigInt(Number.MAX_SAFE_INTEGER);
 
-  for (const [account, context] of accountToContext) {
-    const lastIdStr = await getLastId(context.restaurant.id, 'HBD');
+  for (const account of allAccounts) {
+    const lastIdStr = await getLastId(account, 'HBD');
     const lastIdBigInt = BigInt(lastIdStr);
-    restaurantLastIds.set(context.restaurant.id, lastIdBigInt);
+    accountLastIds.set(account, lastIdBigInt);
     if (lastIdBigInt < minLastId) {
       minLastId = lastIdBigInt;
     }
   }
 
   console.log(`[HBD BATCHED] Polling ${allAccounts.length} accounts, minLastId=${minLastId.toString()}`);
-  console.log(`[HBD BATCHED] Restaurant lastIds:`, Array.from(restaurantLastIds.entries()).map(([id, lastId]) => `${id}=${lastId.toString()}`).join(', '));
+  console.log(`[HBD BATCHED] Account lastIds:`, Array.from(accountLastIds.entries()).map(([acc, lastId]) => `${acc}=${lastId.toString()}`).join(', '));
 
   // Query all accounts at once using ANY operator
   const result = await hafPool.query(
@@ -105,7 +105,7 @@ async function pollHBDBatched(
   console.log(`[HBD BATCHED] Query returned ${result.rows.length} raw rows`);
 
   const allTransfers: Transfer[] = [];
-  const restaurantMaxIds = new Map<string, bigint>();
+  const accountMaxIds = new Map<string, bigint>();
 
   for (const row of result.rows) {
     const account = row.to_account;
@@ -118,11 +118,11 @@ async function pollHBDBatched(
 
     const { restaurant } = context;
     const rowId = BigInt(row.id);
-    const restaurantLastId = restaurantLastIds.get(restaurant.id) || BigInt(0);
+    const accountLastId = accountLastIds.get(account) || BigInt(0);
 
-    // Filter: only include if id > restaurant's lastId
-    if (rowId <= restaurantLastId) {
-      console.warn(`[HBD BATCHED] REJECTED - Already processed: ${account} transfer ID ${row.id} (lastId=${restaurantLastId.toString()})`);
+    // Filter: only include if id > account's lastId
+    if (rowId <= accountLastId) {
+      console.warn(`[HBD BATCHED] REJECTED - Already processed: ${account} transfer ID ${row.id} (lastId=${accountLastId.toString()})`);
       continue;
     }
 
@@ -134,10 +134,10 @@ async function pollHBDBatched(
       continue;
     }
 
-    // Track max ID for this restaurant
-    const currentMax = restaurantMaxIds.get(restaurant.id) || BigInt(0);
+    // Track max ID for this account
+    const currentMax = accountMaxIds.get(account) || BigInt(0);
     if (rowId > currentMax) {
-      restaurantMaxIds.set(restaurant.id, rowId);
+      accountMaxIds.set(account, rowId);
     }
 
     allTransfers.push({
@@ -153,13 +153,13 @@ async function pollHBDBatched(
     });
   }
 
-  // Update lastId for each restaurant that received transfers
-  for (const [restaurantId, maxId] of restaurantMaxIds) {
-    await setLastId(restaurantId, 'HBD', maxId.toString());
-    console.log(`[HBD BATCHED] Updated lastId to ${maxId.toString()} for ${restaurantId}`);
+  // Update lastId for each account that received transfers
+  for (const [account, maxId] of accountMaxIds) {
+    await setLastId(account, 'HBD', maxId.toString());
+    console.log(`[HBD BATCHED] Updated lastId to ${maxId.toString()} for ${account}`);
   }
 
-  console.log(`[HBD BATCHED] Found ${allTransfers.length} transfers across ${restaurantMaxIds.size} restaurants`);
+  console.log(`[HBD BATCHED] Found ${allTransfers.length} transfers across ${accountMaxIds.size} accounts`);
   return allTransfers;
 }
 
@@ -174,14 +174,14 @@ async function pollHiveEngineTokenBatched(
 ): Promise<Transfer[]> {
   if (allAccounts.length === 0) return [];
 
-  // Get lastId for each restaurant (keyed by restaurant_id, not account)
-  const restaurantLastIds = new Map<string, bigint>();
+  // Get lastId for each ACCOUNT (not restaurant) to properly handle prod/dev separately
+  const accountLastIds = new Map<string, bigint>();
   let minLastId = BigInt(Number.MAX_SAFE_INTEGER);
 
-  for (const [account, context] of accountToContext) {
-    const lastIdStr = await getLastId(context.restaurant.id, symbol);
+  for (const account of allAccounts) {
+    const lastIdStr = await getLastId(account, symbol);
     const lastIdBigInt = BigInt(lastIdStr);
-    restaurantLastIds.set(context.restaurant.id, lastIdBigInt);
+    accountLastIds.set(account, lastIdBigInt);
     if (lastIdBigInt < minLastId) {
       minLastId = lastIdBigInt;
     }
@@ -224,7 +224,7 @@ async function pollHiveEngineTokenBatched(
     }
 
     const allTransfers: Transfer[] = [];
-    const restaurantMaxIds = new Map<string, bigint>();
+    const accountMaxIds = new Map<string, bigint>();
 
     for (const row of result.rows) {
       // Parse JSON
@@ -253,10 +253,10 @@ async function pollHiveEngineTokenBatched(
       const context = accountToContext.get(toAccount)!;
       const { restaurant } = context;
       const rowId = BigInt(row.id);
-      const restaurantLastId = restaurantLastIds.get(restaurant.id) || BigInt(0);
+      const accountLastId = accountLastIds.get(toAccount) || BigInt(0);
 
-      // Filter: only include if id > restaurant's lastId
-      if (rowId <= restaurantLastId) {
+      // Filter: only include if id > account's lastId
+      if (rowId <= accountLastId) {
         continue;
       }
 
@@ -285,10 +285,10 @@ async function pollHiveEngineTokenBatched(
 
       const quantity = jsonData.contractPayload?.quantity || '0';
 
-      // Track max ID for this restaurant
-      const currentMax = restaurantMaxIds.get(restaurant.id) || BigInt(0);
+      // Track max ID for this account
+      const currentMax = accountMaxIds.get(toAccount) || BigInt(0);
       if (rowId > currentMax) {
-        restaurantMaxIds.set(restaurant.id, rowId);
+        accountMaxIds.set(toAccount, rowId);
       }
 
       allTransfers.push({
@@ -305,13 +305,13 @@ async function pollHiveEngineTokenBatched(
       });
     }
 
-    // Update lastId for each restaurant that received transfers
-    for (const [restaurantId, maxId] of restaurantMaxIds) {
-      await setLastId(restaurantId, symbol, maxId.toString());
-      console.log(`[${symbol} BATCHED] Updated lastId to ${maxId.toString()} for ${restaurantId}`);
+    // Update lastId for each account that received transfers
+    for (const [account, maxId] of accountMaxIds) {
+      await setLastId(account, symbol, maxId.toString());
+      console.log(`[${symbol} BATCHED] Updated lastId to ${maxId.toString()} for ${account}`);
     }
 
-    console.log(`[${symbol} BATCHED] Found ${allTransfers.length} transfers across ${restaurantMaxIds.size} restaurants`);
+    console.log(`[${symbol} BATCHED] Found ${allTransfers.length} transfers across ${accountMaxIds.size} accounts`);
     return allTransfers;
   } finally {
     client.release();

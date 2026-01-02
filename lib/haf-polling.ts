@@ -88,6 +88,7 @@ async function pollHBDBatched(
   }
 
   console.log(`[HBD BATCHED] Polling ${allAccounts.length} accounts, minLastId=${minLastId.toString()}`);
+  console.log(`[HBD BATCHED] Restaurant lastIds:`, Array.from(restaurantLastIds.entries()).map(([id, lastId]) => `${id}=${lastId.toString()}`).join(', '));
 
   // Query all accounts at once using ANY operator
   const result = await hafPool.query(
@@ -121,6 +122,7 @@ async function pollHBDBatched(
 
     // Filter: only include if id > restaurant's lastId
     if (rowId <= restaurantLastId) {
+      console.warn(`[HBD BATCHED] REJECTED - Already processed: ${account} transfer ID ${row.id} (lastId=${restaurantLastId.toString()})`);
       continue;
     }
 

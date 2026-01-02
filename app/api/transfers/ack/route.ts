@@ -2,7 +2,7 @@
 // Called by restaurant co pages after they've successfully inserted transfer into their DB
 
 import { NextRequest, NextResponse } from 'next/server';
-import { redis } from '@/lib/redis';
+import { execRaw } from '@/lib/redis';
 
 export const runtime = 'edge';
 export const dynamic = 'force-dynamic';
@@ -64,13 +64,8 @@ export async function POST(request: NextRequest) {
 
     console.log(`[ACK] Acknowledging ${messageIds.length} messages for ${streamKey}`);
 
-    // Acknowledge messages one at a time to avoid TypeScript spread issues
-    // Each xack returns 0 or 1
-    let ackCount = 0;
-    for (const msgId of messageIds) {
-      const result = await redis.xack(streamKey, groupName, msgId);
-      ackCount += result;
-    }
+    // Acknowledge all messages at once using raw command
+    const ackCount = await execRaw<number>(['XACK', streamKey, groupName, ...messageIds]);
 
     console.log(`[ACK] Successfully acknowledged ${ackCount}/${messageIds.length} messages`);
 

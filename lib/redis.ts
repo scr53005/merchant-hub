@@ -73,3 +73,32 @@ export async function publishSystemBroadcast(broadcast: {
   // Publish to system broadcasts stream
   await redis.xadd('system:broadcasts', '*', broadcast);
 }
+
+// Execute raw Redis commands via REST API (for commands not supported by SDK)
+export async function execRaw<T = any>(command: string[]): Promise<T> {
+  const url = process.env.KV_REST_API_URL!;
+  const token = process.env.KV_REST_API_TOKEN!;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(command),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Redis command failed: ${text}`);
+  }
+
+  const data = await response.json();
+
+  // Upstash REST API returns { result: <value> } or { error: <message> }
+  if (data.error) {
+    throw new Error(data.error);
+  }
+
+  return data.result as T;
+}

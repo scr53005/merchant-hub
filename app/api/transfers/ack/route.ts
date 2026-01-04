@@ -3,41 +3,13 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { execRaw } from '@/lib/redis';
+import { handleCorsPreflight, corsResponse } from '@/lib/cors';
 
 export const runtime = 'edge';
 export const dynamic = 'force-dynamic';
 
-// Dynamic CORS handler (same as consume endpoint)
-function getCorsHeaders(request: NextRequest): Record<string, string> {
-  const origin = request.headers.get('origin') || '';
-
-  const isAllowed =
-    /^https:\/\/[a-z0-9-]+\.innopay\.lu$/i.test(origin) ||
-    /^http:\/\/localhost(:\d+)?$/i.test(origin) ||
-    /^http:\/\/192\.168\.\d+\.\d+(:\d+)?$/i.test(origin);
-
-  if (isAllowed) {
-    return {
-      'Access-Control-Allow-Origin': origin,
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      'Access-Control-Allow-Credentials': 'true',
-    };
-  }
-
-  if (process.env.NODE_ENV !== 'production') {
-    return {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    };
-  }
-
-  return {};
-}
-
 export async function OPTIONS(request: NextRequest) {
-  return NextResponse.json({}, { headers: getCorsHeaders(request) });
+  return handleCorsPreflight(request);
 }
 
 export async function POST(request: NextRequest) {
@@ -46,16 +18,18 @@ export async function POST(request: NextRequest) {
     const { restaurantId, messageIds } = body;
 
     if (!restaurantId) {
-      return NextResponse.json(
+      return corsResponse(
         { error: 'restaurantId is required' },
-        { status: 400, headers: getCorsHeaders(request) }
+        request,
+        { status: 400 }
       );
     }
 
     if (!messageIds || !Array.isArray(messageIds) || messageIds.length === 0) {
-      return NextResponse.json(
+      return corsResponse(
         { error: 'messageIds array is required' },
-        { status: 400, headers: getCorsHeaders(request) }
+        request,
+        { status: 400 }
       );
     }
 
@@ -73,21 +47,22 @@ export async function POST(request: NextRequest) {
       console.warn(`[ACK] Warning: Only ${ackCount} out of ${messageIds.length} messages were acknowledged`);
     }
 
-    return NextResponse.json(
+    return corsResponse(
       {
         success: true,
         acknowledged: ackCount,
         total: messageIds.length,
         messageIds,
       },
-      { headers: getCorsHeaders(request) }
+      request
     );
 
   } catch (error: any) {
     console.error('[API /transfers/ack] Error:', error);
-    return NextResponse.json(
+    return corsResponse(
       { error: error.message || 'Failed to acknowledge transfers' },
-      { status: 500, headers: getCorsHeaders(request) }
+      request,
+      { status: 500 }
     );
   }
 }

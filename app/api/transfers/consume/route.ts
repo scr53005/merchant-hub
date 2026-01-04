@@ -4,41 +4,13 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { execRaw } from '@/lib/redis';
+import { handleCorsPreflight, corsResponse } from '@/lib/cors';
 
 export const runtime = 'edge';
 export const dynamic = 'force-dynamic';
 
-// Dynamic CORS handler
-function getCorsHeaders(request: NextRequest): Record<string, string> {
-  const origin = request.headers.get('origin') || '';
-
-  const isAllowed =
-    /^https:\/\/[a-z0-9-]+\.innopay\.lu$/i.test(origin) ||
-    /^http:\/\/localhost(:\d+)?$/i.test(origin) ||
-    /^http:\/\/192\.168\.\d+\.\d+(:\d+)?$/i.test(origin);
-
-  if (isAllowed) {
-    return {
-      'Access-Control-Allow-Origin': origin,
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      'Access-Control-Allow-Credentials': 'true',
-    };
-  }
-
-  if (process.env.NODE_ENV !== 'production') {
-    return {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    };
-  }
-
-  return {};
-}
-
 export async function OPTIONS(request: NextRequest) {
-  return NextResponse.json({}, { headers: getCorsHeaders(request) });
+  return handleCorsPreflight(request);
 }
 
 export async function GET(request: NextRequest) {
@@ -49,9 +21,10 @@ export async function GET(request: NextRequest) {
     const count = parseInt(searchParams.get('count') || '10');
 
     if (!restaurantId) {
-      return NextResponse.json(
+      return corsResponse(
         { error: 'restaurantId is required' },
-        { status: 400, headers: getCorsHeaders(request) }
+        request,
+        { status: 400 }
       );
     }
 
@@ -95,9 +68,9 @@ export async function GET(request: NextRequest) {
         // Ignore errors checking pending
       }
 
-      return NextResponse.json(
+      return corsResponse(
         { transfers: [], pending: pendingCount },
-        { headers: getCorsHeaders(request) }
+        request
       );
     }
 
@@ -121,7 +94,7 @@ export async function GET(request: NextRequest) {
     console.log(`[CONSUME] Delivered ${transfers.length} transfers to consumer '${consumerId}'`);
     console.log(`[CONSUME] Message IDs:`, transfers.map((t: any) => t.messageId).join(', '));
 
-    return NextResponse.json(
+    return corsResponse(
       {
         transfers,
         consumerId,
@@ -129,14 +102,15 @@ export async function GET(request: NextRequest) {
         groupName,
         message: `${transfers.length} transfers delivered. Must ACK after successful processing.`
       },
-      { headers: getCorsHeaders(request) }
+      request
     );
 
   } catch (error: any) {
     console.error('[API /transfers/consume] Error:', error);
-    return NextResponse.json(
+    return corsResponse(
       { error: error.message || 'Failed to consume transfers' },
-      { status: 500, headers: getCorsHeaders(request) }
+      request,
+      { status: 500 }
     );
   }
 }

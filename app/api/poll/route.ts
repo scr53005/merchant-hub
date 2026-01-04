@@ -5,8 +5,14 @@
 import { NextResponse } from 'next/server';
 import { setHeartbeat, refreshPollerLock, getPoller } from '@/lib/redis';
 import { pollAllTransfers } from '@/lib/haf-polling';
+import { handleCorsPreflight, corsResponse } from '@/lib/cors';
 
-export async function GET() {
+// Handle CORS preflight
+export async function OPTIONS(request: Request) {
+  return handleCorsPreflight(request);
+}
+
+export async function GET(request: Request) {
   const startTime = Date.now();
 
   try {
@@ -27,21 +33,22 @@ export async function GET() {
 
     console.log(`[poll] Completed in ${duration}ms, found ${transfers.length} transfers`);
 
-    return NextResponse.json({
+    return corsResponse({
       success: true,
       transfersFound: transfers.length,
       poller: currentPoller,
       duration,
       timestamp: Date.now(),
-    });
+    }, request);
   } catch (error: any) {
     console.error('Poll error:', error);
-    return NextResponse.json(
+    return corsResponse(
       {
         error: 'Failed to poll HAF',
         details: error.message,
         duration: Date.now() - startTime,
       },
+      request,
       { status: 500 }
     );
   }

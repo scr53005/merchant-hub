@@ -89,8 +89,7 @@ async function pollHBDBatched(
     }
   }
 
-  console.log(`[HBD BATCHED] Polling ${allAccounts.length} accounts, minLastId=${minLastId.toString()}`);
-  console.log(`[HBD BATCHED] Account lastIds:`, Array.from(accountLastIds.entries()).map(([acc, lastId]) => `${acc}=${lastId.toString()}`).join(', '));
+  console.log(`[HBD BATCHED] Polling ${allAccounts.length} accounts, lastIds:`, Array.from(accountLastIds.entries()).map(([acc, lastId]) => `${acc}=${lastId.toString()}`).join(', '));
 
   // Query all accounts at once using ANY operator
   const accountsArrayLiteral = `ARRAY['${allAccounts.join("','")}']`;

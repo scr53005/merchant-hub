@@ -12,9 +12,10 @@ export const RESTAURANTS: RestaurantConfig[] = [
     },
     currencies: ['HBD', 'EURO', 'OCLT'],
     memoFilters: {
-      HBD: '%TABLE %',
-      EURO: '%TABLE %',
-      OCLT: '%TABLE %',
+      // Filter on distriate pattern - allows both dine-in (TABLE X) and takeaway orders
+      HBD: '%-inno-%',
+      EURO: '%-inno-%',
+      OCLT: '%-inno-%',
     },
   },
   {
@@ -26,9 +27,10 @@ export const RESTAURANTS: RestaurantConfig[] = [
     },
     currencies: ['HBD', 'EURO', 'OCLT'],
     memoFilters: {
-      HBD: '%TABLE %',
-      EURO: '%TABLE %',
-      OCLT: '%TABLE %',
+      // Filter on distriate pattern - allows both dine-in (TABLE X) and takeaway orders
+      HBD: '%-inno-%',
+      EURO: '%-inno-%',
+      OCLT: '%-inno-%',
     },
   },
 ];

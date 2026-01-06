@@ -47,31 +47,54 @@ export async function GET(request: NextRequest) {
 
     // Read new messages using consumer group
     // '>' means "only new messages that haven't been delivered to any consumer"
-    const result = await execRaw<any[]>([
+    let result = await execRaw<any[]>([
       'XREADGROUP', 'GROUP', groupName, consumerId,
       'COUNT', count.toString(),
       'STREAMS', streamKey, '>'
     ]);
 
+    // If no new messages, try to claim pending messages from other consumers
+    // that have been idle for more than 10 seconds (10000ms)
     if (!result || result.length === 0) {
       console.log(`[CONSUME] No new transfers for consumer '${consumerId}' in ${streamKey}`);
 
-      // Check for pending messages count
-      let pendingCount = 0;
+      // Try to auto-claim pending messages from other (possibly dead) consumers
+      // XAUTOCLAIM: automatically claim messages idle for min-idle-time
       try {
-        const pendingInfo = await execRaw<any>(['XPENDING', streamKey, groupName]);
-        pendingCount = pendingInfo?.[0] || 0;
-        if (pendingCount > 0) {
-          console.log(`[CONSUME] Found ${pendingCount} pending (unacknowledged) messages`);
+        const MIN_IDLE_TIME = 10000; // 10 seconds
+        const autoclaimResult = await execRaw<any>([
+          'XAUTOCLAIM', streamKey, groupName, consumerId,
+          MIN_IDLE_TIME.toString(), '0-0', 'COUNT', count.toString()
+        ]);
+
+        // XAUTOCLAIM returns: [next-cursor, [[id, [field, value, ...]], ...], [deleted-ids]]
+        if (autoclaimResult && autoclaimResult[1] && autoclaimResult[1].length > 0) {
+          console.log(`[CONSUME] Auto-claimed ${autoclaimResult[1].length} pending messages`);
+          // Convert to same format as XREADGROUP result
+          result = [[streamKey, autoclaimResult[1]]];
         }
-      } catch {
-        // Ignore errors checking pending
+      } catch (err: any) {
+        console.log(`[CONSUME] XAUTOCLAIM not available or failed:`, err.message);
       }
 
-      return corsResponse(
-        { transfers: [], pending: pendingCount },
-        request
-      );
+      // If still no messages, return empty with pending count
+      if (!result || result.length === 0) {
+        let pendingCount = 0;
+        try {
+          const pendingInfo = await execRaw<any>(['XPENDING', streamKey, groupName]);
+          pendingCount = pendingInfo?.[0] || 0;
+          if (pendingCount > 0) {
+            console.log(`[CONSUME] Found ${pendingCount} pending (unacknowledged) messages`);
+          }
+        } catch {
+          // Ignore errors checking pending
+        }
+
+        return corsResponse(
+          { transfers: [], pending: pendingCount },
+          request
+        );
+      }
     }
 
     // Parse Redis Stream response

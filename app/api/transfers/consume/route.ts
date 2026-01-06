@@ -33,6 +33,14 @@ export async function GET(request: NextRequest) {
 
     console.log(`[CONSUME] Consumer '${consumerId}' reading from ${streamKey} (group: ${groupName})`);
 
+    // Debug: Check stream length
+    try {
+      const streamLen = await execRaw<number>(['XLEN', streamKey]);
+      console.log(`[CONSUME] Stream ${streamKey} has ${streamLen} total messages`);
+    } catch (err) {
+      console.log(`[CONSUME] Could not get stream length: ${err}`);
+    }
+
     // Ensure consumer group exists
     // Try to create it; if it already exists, ignore the error
     try {
@@ -83,11 +91,20 @@ export async function GET(request: NextRequest) {
         try {
           const pendingInfo = await execRaw<any>(['XPENDING', streamKey, groupName]);
           pendingCount = pendingInfo?.[0] || 0;
+          console.log(`[CONSUME] XPENDING result:`, JSON.stringify(pendingInfo));
           if (pendingCount > 0) {
             console.log(`[CONSUME] Found ${pendingCount} pending (unacknowledged) messages`);
           }
-        } catch {
-          // Ignore errors checking pending
+        } catch (pendingErr) {
+          console.log(`[CONSUME] XPENDING error:`, pendingErr);
+        }
+
+        // Debug: Show all messages in stream (first 5)
+        try {
+          const allMessages = await execRaw<any>(['XRANGE', streamKey, '-', '+', 'COUNT', '5']);
+          console.log(`[CONSUME] XRANGE (first 5 messages in stream):`, JSON.stringify(allMessages));
+        } catch (rangeErr) {
+          console.log(`[CONSUME] XRANGE error:`, rangeErr);
         }
 
         return corsResponse(

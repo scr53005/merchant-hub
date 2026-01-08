@@ -151,7 +151,7 @@ async function pollHBDBatched(
     allTransfers.push({
       id: row.id.toString(),
       restaurant_id: restaurant.id,
-      account: account, // Include account for environment filtering in co pages
+      to_account: account, // The recipient's Hive account (matches HAFSQL column name)
       from_account: row.from_account,
       amount: row.amount.toString(),
       symbol: 'HBD',
@@ -302,7 +302,7 @@ async function pollHiveEngineTokenBatched(
       allTransfers.push({
         id: row.id.toString(),
         restaurant_id: restaurant.id,
-        account: toAccount, // Include account for environment filtering in co pages
+        to_account: toAccount, // The recipient's Hive account (matches HAFSQL column name)
         from_account: fromAccount,
         amount: quantity,
         symbol: symbol,

@@ -3,7 +3,7 @@
 // Returns status and whether this shop should start polling
 
 import { NextResponse } from 'next/server';
-import { getHeartbeat, getPoller, attemptTakeoverAsPoller, setMode, publishSystemBroadcast } from '@/lib/redis';
+import { getPollingState, getHeartbeatFromState, getPollerFromState, attemptTakeoverAsPollerV2, updatePollingState, publishSystemBroadcast } from '@/lib/redis';
 import { POLLING_CONFIG } from '@/lib/config';
 import { handleCorsPreflight, corsResponse } from '@/lib/cors';
 
@@ -24,8 +24,11 @@ export async function POST(request: Request) {
       );
     }
 
-    const heartbeat = await getHeartbeat();
-    const currentPoller = await getPoller();
+    // Get polling state in one operation
+    // Redis cost: 1 HGETALL
+    const pollingState = await getPollingState();
+    const heartbeat = getHeartbeatFromState(pollingState);
+    const currentPoller = getPollerFromState(pollingState);
     const now = Date.now();
 
     // Check if polling is active (heartbeat is fresh)
@@ -47,12 +50,15 @@ export async function POST(request: Request) {
     const randomDelay = Math.floor(Math.random() * POLLING_CONFIG.TAKEOVER_DELAY_MAX);
     await new Promise(resolve => setTimeout(resolve, randomDelay));
 
-    // Attempt takeover
-    const won = await attemptTakeoverAsPoller(shopId);
+    // Attempt takeover (also updates hash with poller field)
+    const won = await attemptTakeoverAsPollerV2(shopId);
 
     if (won) {
       // This shop is now the poller
-      await setMode('active-6s');
+      // Update mode in hash
+      // Redis cost: 1 HMSET
+      await updatePollingState({ mode: 'active-6s' });
+
       await publishSystemBroadcast({
         type: 'polling-started',
         poller: shopId,
@@ -71,7 +77,8 @@ export async function POST(request: Request) {
       }, request);
     } else {
       // Another shop won the race
-      const newPoller = await getPoller();
+      const newPollingState = await getPollingState();
+      const newPoller = getPollerFromState(newPollingState);
       console.log(`[wake-up] ${shopId} lost takeover race to ${newPoller}`);
 
       return corsResponse({

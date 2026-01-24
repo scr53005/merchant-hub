@@ -4,7 +4,7 @@
 import { Pool } from 'pg';
 import { Transfer, RestaurantConfig, Currency } from '@/types';
 import { getAllAccounts } from './config';
-import { getLastId, setLastId, publishTransfer } from './redis';
+import { getPollingState, updatePollingState, getLastIdFromState, buildLastIdUpdate, publishTransfer } from './redis';
 
 const hafPool = new Pool({
   connectionString: process.env.HAF_CONNECTION_STRING,
@@ -16,11 +16,18 @@ const hafPool = new Pool({
  * Uses batched queries (ONE query per currency for ALL restaurants)
  * Queries BOTH prod and dev accounts simultaneously (O(1) scaling makes this negligible)
  * Returns array of detected transfers
+ *
+ * NEW (Option 3): Uses single hash for all state (1 HGETALL + 1 HMSET)
  */
 export async function pollAllTransfers(): Promise<Transfer[]> {
   const allTransfers: Transfer[] = [];
 
   try {
+    // Get ALL polling state in one operation (heartbeat, mode, all lastIds)
+    // Redis cost: 1 HGETALL
+    const pollingState = await getPollingState();
+    console.log('[POLLING] Retrieved polling state from single hash');
+
     // Get ALL accounts (both prod and dev for all restaurants)
     const accountConfigs = getAllAccounts();
     console.log(`[POLLING] getAllAccounts() returned:`, JSON.stringify(accountConfigs.map(c => ({ account: c.account, restaurant: c.restaurant.id, env: c.env }))));
@@ -39,17 +46,27 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
     console.log(`[POLLING] Batched polling for ${accountList.length} accounts (prod+dev): ${accountList.join(', ')}`);
     console.log(`[POLLING] Account map:`, Array.from(accountToContext.entries()).map(([acc, ctx]) => `${acc}→${ctx.restaurant.id}(${ctx.env})`).join(', '));
 
+    // Collect all lastId updates to batch at the end
+    const lastIdUpdates: Record<string, string> = {};
+
     // Poll HBD - ONE query for all accounts
-    const hbdTransfers = await pollHBDBatched(accountList, accountToContext);
+    const hbdTransfers = await pollHBDBatched(accountList, accountToContext, pollingState, lastIdUpdates);
     allTransfers.push(...hbdTransfers);
 
     // Poll EURO - ONE query for all accounts
-    const euroTransfers = await pollHiveEngineTokenBatched('EURO', accountList, accountToContext);
+    const euroTransfers = await pollHiveEngineTokenBatched('EURO', accountList, accountToContext, pollingState, lastIdUpdates);
     allTransfers.push(...euroTransfers);
 
     // Poll OCLT - ONE query for all accounts
-    const ocltTransfers = await pollHiveEngineTokenBatched('OCLT', accountList, accountToContext);
+    const ocltTransfers = await pollHiveEngineTokenBatched('OCLT', accountList, accountToContext, pollingState, lastIdUpdates);
     allTransfers.push(...ocltTransfers);
+
+    // Update all lastIds in one operation
+    // Redis cost: 1 HMSET (updates all changed lastIds at once)
+    if (Object.keys(lastIdUpdates).length > 0) {
+      await updatePollingState(lastIdUpdates);
+      console.log(`[POLLING] Updated ${Object.keys(lastIdUpdates).length} lastId values in single hash`);
+    }
 
     // Publish transfers to Redis Streams (grouped by restaurant)
     // Co pages will filter by account name if they need environment-specific filtering
@@ -69,19 +86,22 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
 /**
  * Poll HBD transfers for ALL restaurants in a single batched query
  * Uses SQL IN operator to query all accounts at once
+ * NEW: Uses polling state object instead of individual Redis calls
  */
 async function pollHBDBatched(
   allAccounts: string[],
-  accountToContext: Map<string, { restaurant: RestaurantConfig; env: 'prod' | 'dev' }>
+  accountToContext: Map<string, { restaurant: RestaurantConfig; env: 'prod' | 'dev' }>,
+  pollingState: any,
+  lastIdUpdates: Record<string, string>
 ): Promise<Transfer[]> {
   if (allAccounts.length === 0) return [];
 
-  // Get lastId for each ACCOUNT (not restaurant) to properly handle prod/dev separately
+  // Get lastId for each ACCOUNT from polling state (no Redis calls)
   const accountLastIds = new Map<string, bigint>();
   let minLastId = BigInt(Number.MAX_SAFE_INTEGER);
 
   for (const account of allAccounts) {
-    const lastIdStr = await getLastId(account, 'HBD');
+    const lastIdStr = getLastIdFromState(pollingState, account, 'HBD');
     const lastIdBigInt = BigInt(lastIdStr);
     accountLastIds.set(account, lastIdBigInt);
     if (lastIdBigInt < minLastId) {
@@ -161,10 +181,11 @@ async function pollHBDBatched(
     });
   }
 
-  // Update lastId for each account that received transfers
+  // Build lastId updates for each account that received transfers
+  // These will be batched together in pollAllTransfers
   for (const [account, maxId] of accountMaxIds) {
-    await setLastId(account, 'HBD', maxId.toString());
-    console.log(`[HBD BATCHED] Updated lastId to ${maxId.toString()} for ${account}`);
+    Object.assign(lastIdUpdates, buildLastIdUpdate(account, 'HBD', maxId.toString()));
+    console.log(`[HBD BATCHED] Queued lastId update to ${maxId.toString()} for ${account}`);
   }
 
   console.log(`[HBD BATCHED] Found ${allTransfers.length} transfers across ${accountMaxIds.size} accounts`);
@@ -174,20 +195,23 @@ async function pollHBDBatched(
 /**
  * Poll Hive-Engine tokens (EURO, OCLT) for ALL restaurants in a single batched query
  * Uses block range and filters in application code for each restaurant
+ * NEW: Uses polling state object instead of individual Redis calls
  */
 async function pollHiveEngineTokenBatched(
   symbol: 'EURO' | 'OCLT',
   allAccounts: string[],
-  accountToContext: Map<string, { restaurant: RestaurantConfig; env: 'prod' | 'dev' }>
+  accountToContext: Map<string, { restaurant: RestaurantConfig; env: 'prod' | 'dev' }>,
+  pollingState: any,
+  lastIdUpdates: Record<string, string>
 ): Promise<Transfer[]> {
   if (allAccounts.length === 0) return [];
 
-  // Get lastId for each ACCOUNT (not restaurant) to properly handle prod/dev separately
+  // Get lastId for each ACCOUNT from polling state (no Redis calls)
   const accountLastIds = new Map<string, bigint>();
   let minLastId = BigInt(Number.MAX_SAFE_INTEGER);
 
   for (const account of allAccounts) {
-    const lastIdStr = await getLastId(account, symbol);
+    const lastIdStr = getLastIdFromState(pollingState, account, symbol);
     const lastIdBigInt = BigInt(lastIdStr);
     accountLastIds.set(account, lastIdBigInt);
     if (lastIdBigInt < minLastId) {
@@ -313,10 +337,11 @@ async function pollHiveEngineTokenBatched(
       });
     }
 
-    // Update lastId for each account that received transfers
+    // Build lastId updates for each account that received transfers
+    // These will be batched together in pollAllTransfers
     for (const [account, maxId] of accountMaxIds) {
-      await setLastId(account, symbol, maxId.toString());
-      console.log(`[${symbol} BATCHED] Updated lastId to ${maxId.toString()} for ${account}`);
+      Object.assign(lastIdUpdates, buildLastIdUpdate(account, symbol, maxId.toString()));
+      console.log(`[${symbol} BATCHED] Queued lastId update to ${maxId.toString()} for ${account}`);
     }
 
     console.log(`[${symbol} BATCHED] Found ${allTransfers.length} transfers across ${accountMaxIds.size} accounts`);

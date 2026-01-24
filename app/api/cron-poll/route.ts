@@ -3,7 +3,7 @@
 // Only polls if no active 6-second poller exists (all shops are closed)
 
 import { NextResponse } from 'next/server';
-import { getHeartbeat, setHeartbeat, setMode, publishSystemBroadcast } from '@/lib/redis';
+import { getPollingState, getHeartbeatFromState, updatePollingState, publishSystemBroadcast } from '@/lib/redis';
 import { pollAllTransfers } from '@/lib/haf-polling';
 import { POLLING_CONFIG } from '@/lib/config';
 
@@ -11,7 +11,10 @@ export async function GET() {
   const startTime = Date.now();
 
   try {
-    const heartbeat = await getHeartbeat();
+    // Get all polling state in one operation
+    // Redis cost: 1 HGETALL
+    const pollingState = await getPollingState();
+    const heartbeat = getHeartbeatFromState(pollingState);
     const now = Date.now();
 
     // Check if there's an active 6-second poller
@@ -31,8 +34,12 @@ export async function GET() {
     // No active poller, this cron is the fallback
     console.log('[cron-poll] No active poller detected, polling as fallback');
 
-    // Set mode to sleeping (1-minute polling)
-    await setMode('sleeping-1min');
+    // Update state: mode and heartbeat
+    // Redis cost: 1 HMSET
+    await updatePollingState({
+      mode: 'sleeping-1min',
+      heartbeat: now,
+    });
 
     // Broadcast that we're in sleeping mode
     await publishSystemBroadcast({
@@ -41,11 +48,8 @@ export async function GET() {
       timestamp: now,
     });
 
-    // Poll HAF
+    // Poll HAF (internally does 1 HGETALL + 1 HMSET for lastIds)
     const transfers = await pollAllTransfers();
-
-    // Update heartbeat
-    await setHeartbeat(now);
 
     const duration = Date.now() - startTime;
 

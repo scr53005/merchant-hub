@@ -2,7 +2,7 @@
 // GET /api/heartbeat
 
 import { NextResponse } from 'next/server';
-import { getHeartbeat, getPoller, getMode } from '@/lib/redis';
+import { getPollingState, getHeartbeatFromState, getPollerFromState, getModeFromState } from '@/lib/redis';
 import { POLLING_CONFIG } from '@/lib/config';
 import { handleCorsPreflight, corsResponse } from '@/lib/cors';
 
@@ -13,9 +13,12 @@ export async function OPTIONS(request: Request) {
 
 export async function GET(request: Request) {
   try {
-    const heartbeat = await getHeartbeat();
-    const poller = await getPoller();
-    const mode = await getMode();
+    // Get all polling state in one operation
+    // Redis cost: 1 HGETALL
+    const pollingState = await getPollingState();
+    const heartbeat = getHeartbeatFromState(pollingState);
+    const poller = getPollerFromState(pollingState);
+    const mode = getModeFromState(pollingState);
 
     const now = Date.now();
     const isActive = heartbeat && (now - heartbeat < POLLING_CONFIG.HEARTBEAT_TIMEOUT);

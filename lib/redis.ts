@@ -102,3 +102,131 @@ export async function execRaw<T = any>(command: string[]): Promise<T> {
 
   return data.result as T;
 }
+
+// ========================================================================
+// NEW: Single Hash State Management (Option 3)
+// All polling state consolidated into one Redis hash for efficiency
+// ========================================================================
+
+const POLLING_STATE_KEY = 'polling:state';
+
+export interface PollingState {
+  heartbeat?: string;  // Stored as string in Redis
+  poller?: string;
+  mode?: 'active-6s' | 'sleeping-1min';
+  // Dynamic lastId fields: "{account}:{currency}" -> id
+  // e.g., "indies.cafe:HBD" -> "12345"
+  [key: string]: string | undefined;
+}
+
+/**
+ * Get all polling state from single Redis hash
+ * @returns PollingState object with all fields
+ * Redis cost: 1 HGETALL
+ */
+export async function getPollingState(): Promise<PollingState> {
+  const state = await redis.hgetall<Record<string, string>>(POLLING_STATE_KEY);
+  return state || {};
+}
+
+/**
+ * Update multiple fields in polling state hash
+ * @param updates - Object with fields to update
+ * Redis cost: 1 HMSET (regardless of number of fields)
+ */
+export async function updatePollingState(updates: Record<string, string | number>): Promise<void> {
+  if (Object.keys(updates).length === 0) return;
+
+  // Convert all values to strings for Redis
+  const stringUpdates: Record<string, string> = {};
+  for (const [key, value] of Object.entries(updates)) {
+    stringUpdates[key] = String(value);
+  }
+
+  await redis.hmset(POLLING_STATE_KEY, stringUpdates);
+}
+
+/**
+ * Get heartbeat timestamp from state
+ * @param state - Polling state object (pass result from getPollingState)
+ * @returns Timestamp or null
+ */
+export function getHeartbeatFromState(state: PollingState): number | null {
+  if (!state.heartbeat) return null;
+  return parseInt(state.heartbeat, 10);
+}
+
+/**
+ * Get poller ID from state
+ * @param state - Polling state object
+ * @returns Poller ID or null
+ */
+export function getPollerFromState(state: PollingState): string | null {
+  return state.poller || null;
+}
+
+/**
+ * Get mode from state
+ * @param state - Polling state object
+ * @returns Mode or null
+ */
+export function getModeFromState(state: PollingState): 'active-6s' | 'sleeping-1min' | null {
+  return (state.mode as 'active-6s' | 'sleeping-1min') || null;
+}
+
+/**
+ * Get lastId from state for specific account and currency
+ * @param state - Polling state object
+ * @param account - Hive account name (e.g., 'indies.cafe')
+ * @param currency - Currency symbol (e.g., 'HBD')
+ * @returns LastId or '0' if not found
+ */
+export function getLastIdFromState(state: PollingState, account: string, currency: string): string {
+  const key = `${account}:${currency}`;
+  return state[key] || '0';
+}
+
+/**
+ * Helper to build lastId update objects
+ * Call this for each account+currency, then pass all updates to updatePollingState
+ * @param account - Hive account name
+ * @param currency - Currency symbol
+ * @param id - LastId value
+ * @returns Object with key-value pair to merge into updates
+ */
+export function buildLastIdUpdate(account: string, currency: string, id: string): Record<string, string> {
+  const key = `${account}:${currency}`;
+  return { [key]: id };
+}
+
+/**
+ * Attempt to become the poller using SETNX pattern
+ * NOTE: This still uses a separate key with TTL because HSETNX + HEXPIRE is complex
+ * The poller field in the hash is updated separately for consistency
+ * @param shopId - Shop identifier
+ * @returns true if successfully became poller
+ */
+export async function attemptTakeoverAsPollerV2(shopId: string): Promise<boolean> {
+  // Try to set as poller with NX (only if not exists) and expiry
+  const result = await redis.set('polling:poller', shopId, {
+    nx: true, // Only set if key doesn't exist
+    ex: 30,   // Expires in 30 seconds (safety mechanism)
+  });
+
+  // Also update the hash for consistency
+  if (result === 'OK') {
+    await updatePollingState({ poller: shopId });
+  }
+
+  return result === 'OK';
+}
+
+/**
+ * Refresh poller lock TTL
+ * @param shopId - Shop identifier
+ */
+export async function refreshPollerLockV2(shopId: string): Promise<void> {
+  // Refresh the TTL on the separate poller lock key
+  await redis.expire('polling:poller', 30);
+  // Note: Hash field doesn't need TTL, it's just for reading
+}

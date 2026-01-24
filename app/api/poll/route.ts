@@ -3,7 +3,7 @@
 // Polls HAF database for all restaurants and publishes transfers to Redis
 
 import { NextResponse } from 'next/server';
-import { setHeartbeat, refreshPollerLock, getPoller } from '@/lib/redis';
+import { updatePollingState, refreshPollerLockV2, getPollingState, getPollerFromState } from '@/lib/redis';
 import { pollAllTransfers } from '@/lib/haf-polling';
 import { handleCorsPreflight, corsResponse } from '@/lib/cors';
 
@@ -16,17 +16,23 @@ export async function GET(request: Request) {
   const startTime = Date.now();
 
   try {
-    const currentPoller = await getPoller();
+    // Get current polling state
+    // Redis cost: 1 HGETALL (done internally by pollAllTransfers)
+    const pollingState = await getPollingState();
+    const currentPoller = getPollerFromState(pollingState);
 
     // Poll HAF for all restaurants and all currencies
+    // Internally does: 1 HGETALL (already done above, could optimize) + 1 HMSET
     const transfers = await pollAllTransfers();
 
-    // Update heartbeat
-    await setHeartbeat(Date.now());
+    // Update heartbeat in state
+    // Redis cost: 1 HMSET
+    const now = Date.now();
+    await updatePollingState({ heartbeat: now });
 
     // Refresh poller lock TTL
     if (currentPoller) {
-      await refreshPollerLock(currentPoller);
+      await refreshPollerLockV2(currentPoller);
     }
 
     const duration = Date.now() - startTime;
@@ -38,7 +44,7 @@ export async function GET(request: Request) {
       transfersFound: transfers.length,
       poller: currentPoller,
       duration,
-      timestamp: Date.now(),
+      timestamp: now,
     }, request);
   } catch (error: any) {
     console.error('Poll error:', error);

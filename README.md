@@ -1,28 +1,30 @@
 # Merchant Hub
 
-Centralized HAF polling hub for multi-restaurant payment coordination in the innopay ecosystem.
+Centralized HAF polling hub, system health dashboard, and reporting API for multi-restaurant payment coordination in the innopay ecosystem.
 
 ## Overview
 
-merchant-hub is a **centralized polling service** that monitors the Hive blockchain for incoming transfers to multiple restaurants. It implements a distributed leader election system where restaurant "co pages" (kitchen backends) coordinate to ensure continuous polling while minimizing database load.
+merchant-hub is a **centralized polling service** that monitors the Hive blockchain for incoming transfers to multiple restaurants. It implements a distributed leader election system where restaurant "co pages" (kitchen backends) coordinate to ensure continuous polling while minimizing database load. It also provides a **system health dashboard** (the homepage) and a **reporting API** for accountant exports.
 
 ### Architecture
 
 ```
-┌─────────────────────────────────────────┐
-│  merchant-hub (Vercel)                  │
-│  • Distributed polling coordination     │
-│  • HAF database polling (6s intervals)  │
-│  • Redis Streams for pub/sub            │
-└─────────────────────────────────────────┘
-           │
-           ▼
-┌─────────────────────────────────────────┐
-│  Upstash Redis                          │
-│  • Heartbeat tracking                   │
-│  • Leader election                      │
-│  • Transfer queues                      │
-└─────────────────────────────────────────┘
+┌───────────────────────────────────────────────┐
+│  merchant-hub (Vercel)                        │
+│  • System Health Dashboard (homepage)         │
+│  • Distributed polling coordination           │
+│  • HAF database polling (6s intervals)        │
+│  • Redis Streams for pub/sub                  │
+│  • Reporting API (HAFSQL transaction queries) │
+└───────────────────────────────────────────────┘
+           │                │
+           ▼                ▼
+┌─────────────────┐  ┌──────────────────────────┐
+│  Upstash Redis  │  │  HAFSQL (PostgreSQL)     │
+│  • Heartbeat    │  │  • operation_transfer_table│
+│  • Leader elect │  │  • haf_operations         │
+│  • Transfer Qs  │  │  • haf_blocks             │
+└─────────────────┘  └──────────────────────────┘
      │                    │
      ▼                    ▼
 ┌──────────────┐  ┌──────────────┐
@@ -33,12 +35,14 @@ merchant-hub is a **centralized polling service** that monitors the Hive blockch
 
 ## Features
 
+- **System Health Dashboard**: Live homepage showing polling engine status, per-restaurant Redis stream health, consumer groups, pending messages, and last processed IDs. Auto-refreshes every 10 seconds with green/yellow/red status indicators.
 - **Distributed Leader Election**: First co page to open becomes the poller
 - **Automatic Failover**: If poller crashes, another co page takes over
 - **Collision Avoidance**: Random delays prevent simultaneous takeover attempts
 - **Fallback Polling**: Vercel Cron (1 minute) when all shops are closed
 - **Multi-Currency Support**: HBD, EURO, OCLT (Hive-Engine tokens)
 - **Redis Streams**: Real-time pub/sub for transfers to each restaurant
+- **Reporting API**: Query HAFSQL for historical HBD transfers per restaurant account, used by spoke admin pages for accountant CSV/PDF exports
 
 ## Polling Behavior
 
@@ -60,6 +64,16 @@ merchant-hub is a **centralized polling service** that monitors the Hive blockch
 - Co pages wait random delay (0-1000ms)
 - First to respond becomes new poller
 
+## Pages
+
+### `/` — System Health Dashboard
+Live dashboard showing the full system state at a glance:
+- **Polling Engine**: active/inactive status, current poller, mode, time since last poll
+- **Registered Spokes**: per-restaurant cards with Redis stream length, pending messages, consumer groups, and last processed IDs (prod/dev per currency)
+- **System Broadcasts**: broadcast stream info and consumer group status
+
+Auto-refreshes every 10 seconds (configurable). Dark theme (zinc-950), Geist font, green/yellow/red status dots.
+
 ## API Routes
 
 ### `GET /api/heartbeat`
@@ -75,6 +89,76 @@ Check polling status and current poller.
   "timeSinceLastPoll": 3500
 }
 ```
+
+### `GET /api/status`
+Comprehensive system health endpoint consumed by the dashboard homepage. Returns polling state, per-restaurant Redis stream info, consumer groups, last processed IDs, and system broadcasts in one call.
+
+**Response:**
+```json
+{
+  "timestamp": 1704067200000,
+  "polling": {
+    "heartbeat": 1704067200000,
+    "isActive": true,
+    "poller": "indies",
+    "mode": "active-6s",
+    "timeSinceLastPoll": 3500,
+    "heartbeatTimeout": 15000
+  },
+  "restaurants": [
+    {
+      "id": "indies",
+      "name": "Indies Cafe",
+      "accounts": { "prod": "indies.cafe", "dev": "indies-test" },
+      "currencies": ["HBD", "EURO", "OCLT"],
+      "stream": { "length": 42, "consumerGroups": [...] },
+      "lastIds": { "prod": { "HBD": "...", "EURO": "..." }, "dev": { ... } }
+    }
+  ],
+  "systemBroadcasts": { "length": 5, "consumerGroups": [...] }
+}
+```
+
+### `GET /api/reporting`
+Query HAFSQL for historical HBD transfers to a restaurant account. Used by spoke admin reporting pages for accountant CSV/PDF exports.
+
+**Parameters:**
+- `account` — Hive account (must match a known restaurant from `lib/config.ts`)
+- `from` — Start date (YYYY-MM-DD, inclusive)
+- `to` — End date (YYYY-MM-DD, inclusive)
+
+**Example:** `GET /api/reporting?account=indies.cafe&from=2025-01-01&to=2025-12-31`
+
+**Response:**
+```json
+{
+  "account": "indies.cafe",
+  "from": "2025-01-01",
+  "to": "2025-12-31",
+  "transactions": [
+    {
+      "id": "123456",
+      "timestamp": "2025-03-15T12:30:00.000Z",
+      "from_account": "customer1",
+      "amount": "5.000",
+      "memo": "TABLE 4",
+      "block_num": 80000000
+    }
+  ],
+  "count": 1,
+  "truncated": false,
+  "_strategy": "hafsql.haf_operations (single join, timestamp direct)",
+  "_elapsed_ms": 450
+}
+```
+
+**Notes:**
+- Validates account against registered restaurants in `lib/config.ts`
+- Tries 3 join strategies to resolve operation timestamps (single join preferred, double join fallback)
+- Caches the working strategy for subsequent requests
+- On total failure, runs schema discovery and logs available tables/columns
+- LIMIT 5000 rows, 8s query timeout, CORS enabled
+- Extensive `[REPORTING]` console logging for debugging
 
 ### `POST /api/wake-up`
 Called by co pages when they first open.
@@ -281,9 +365,10 @@ async function subscribeToTransfers() {
 
 - **Next.js 15** - Framework
 - **TypeScript** - Type safety
-- **Upstash Redis** - Serverless Redis (Vercel KV)
-- **PostgreSQL** - HAF database connection
+- **Upstash Redis** - Serverless Redis (Vercel KV) for polling coordination and streams
+- **PostgreSQL (pg)** - HAF database connection for blockchain queries and reporting
 - **Vercel** - Deployment and Cron
+- **Tailwind CSS** - Dashboard styling
 
 ## License
 

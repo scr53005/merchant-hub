@@ -15,7 +15,8 @@ export async function OPTIONS(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { restaurantId, messageIds } = body;
+    const { restaurantId, messageIds, env: bodyEnv } = body;
+    const env = bodyEnv || 'prod'; // Environment: 'prod' or 'dev'
 
     if (!restaurantId) {
       return corsResponse(
@@ -34,14 +35,14 @@ export async function POST(request: NextRequest) {
     }
 
     const streamKey = `transfers:${restaurantId}`;
-    const groupName = `${restaurantId}-consumers`;
+    const groupName = `${restaurantId}-${env}-consumers`;
 
-    console.log(`[ACK] Acknowledging ${messageIds.length} messages for ${streamKey}`);
+    console.warn(`[ACK] Acknowledging ${messageIds.length} messages for ${streamKey} (group: ${groupName}, env: ${env})`);
 
     // Acknowledge all messages at once using raw command
     const ackCount = await execRaw<number>(['XACK', streamKey, groupName, ...messageIds]);
 
-    console.log(`[ACK] Successfully acknowledged ${ackCount}/${messageIds.length} messages`);
+    console.warn(`[ACK] Successfully acknowledged ${ackCount}/${messageIds.length} messages`);
 
     if (ackCount < messageIds.length) {
       console.warn(`[ACK] Warning: Only ${ackCount} out of ${messageIds.length} messages were acknowledged`);

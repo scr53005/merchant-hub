@@ -19,6 +19,7 @@ export async function GET(request: NextRequest) {
     const restaurantId = searchParams.get('restaurantId');
     const consumerId = searchParams.get('consumerId') || 'default-consumer';
     const count = parseInt(searchParams.get('count') || '10');
+    const env = searchParams.get('env') || 'prod'; // Environment: 'prod' or 'dev'
 
     if (!restaurantId) {
       return corsResponse(
@@ -29,23 +30,23 @@ export async function GET(request: NextRequest) {
     }
 
     const streamKey = `transfers:${restaurantId}`;
-    const groupName = `${restaurantId}-consumers`;
+    const groupName = `${restaurantId}-${env}-consumers`;
 
-    console.log(`[CONSUME] Consumer '${consumerId}' reading from ${streamKey} (group: ${groupName})`);
+    console.warn(`[CONSUME] Consumer '${consumerId}' reading from ${streamKey} (group: ${groupName}, env: ${env})`);
 
     // Debug: Check stream length
     try {
       const streamLen = await execRaw<number>(['XLEN', streamKey]);
-      console.log(`[CONSUME] Stream ${streamKey} has ${streamLen} total messages`);
+      console.warn(`[CONSUME] Stream ${streamKey} has ${streamLen} total messages`);
     } catch (err) {
-      console.log(`[CONSUME] Could not get stream length: ${err}`);
+      console.warn(`[CONSUME] Could not get stream length: ${err}`);
     }
 
     // Ensure consumer group exists
     // Try to create it; if it already exists, ignore the error
     try {
       await execRaw(['XGROUP', 'CREATE', streamKey, groupName, '0', 'MKSTREAM']);
-      console.log(`[CONSUME] Created consumer group '${groupName}' for ${streamKey}`);
+      console.warn(`[CONSUME] Created consumer group '${groupName}' for ${streamKey}`);
     } catch (error: any) {
       // Group already exists (error: BUSYGROUP) - this is fine
       if (!error.message?.includes('BUSYGROUP')) {
@@ -64,7 +65,7 @@ export async function GET(request: NextRequest) {
     // If no new messages, try to claim pending messages from other consumers
     // that have been idle for more than 10 seconds (10000ms)
     if (!result || result.length === 0) {
-      console.log(`[CONSUME] No new transfers for consumer '${consumerId}' in ${streamKey}`);
+      console.warn(`[CONSUME] No new transfers for consumer '${consumerId}' in ${streamKey}`);
 
       // Try to auto-claim pending messages from other (possibly dead) consumers
       // XAUTOCLAIM: automatically claim messages idle for min-idle-time
@@ -77,12 +78,12 @@ export async function GET(request: NextRequest) {
 
         // XAUTOCLAIM returns: [next-cursor, [[id, [field, value, ...]], ...], [deleted-ids]]
         if (autoclaimResult && autoclaimResult[1] && autoclaimResult[1].length > 0) {
-          console.log(`[CONSUME] Auto-claimed ${autoclaimResult[1].length} pending messages`);
+          console.warn(`[CONSUME] Auto-claimed ${autoclaimResult[1].length} pending messages`);
           // Convert to same format as XREADGROUP result
           result = [[streamKey, autoclaimResult[1]]];
         }
       } catch (err: any) {
-        console.log(`[CONSUME] XAUTOCLAIM not available or failed:`, err.message);
+        console.warn(`[CONSUME] XAUTOCLAIM not available or failed:`, err.message);
       }
 
       // If still no messages, return empty with pending count
@@ -91,20 +92,20 @@ export async function GET(request: NextRequest) {
         try {
           const pendingInfo = await execRaw<any>(['XPENDING', streamKey, groupName]);
           pendingCount = pendingInfo?.[0] || 0;
-          console.log(`[CONSUME] XPENDING result:`, JSON.stringify(pendingInfo));
+          console.warn(`[CONSUME] XPENDING result:`, JSON.stringify(pendingInfo));
           if (pendingCount > 0) {
-            console.log(`[CONSUME] Found ${pendingCount} pending (unacknowledged) messages`);
+            console.warn(`[CONSUME] Found ${pendingCount} pending (unacknowledged) messages`);
           }
         } catch (pendingErr) {
-          console.log(`[CONSUME] XPENDING error:`, pendingErr);
+          console.warn(`[CONSUME] XPENDING error:`, pendingErr);
         }
 
         // Debug: Show all messages in stream (first 5)
         try {
           const allMessages = await execRaw<any>(['XRANGE', streamKey, '-', '+', 'COUNT', '5']);
-          console.log(`[CONSUME] XRANGE (first 5 messages in stream):`, JSON.stringify(allMessages));
+          console.warn(`[CONSUME] XRANGE (first 5 messages in stream):`, JSON.stringify(allMessages));
         } catch (rangeErr) {
-          console.log(`[CONSUME] XRANGE error:`, rangeErr);
+          console.warn(`[CONSUME] XRANGE error:`, rangeErr);
         }
 
         return corsResponse(
@@ -131,8 +132,8 @@ export async function GET(request: NextRequest) {
       return obj;
     });
 
-    console.log(`[CONSUME] Delivered ${transfers.length} transfers to consumer '${consumerId}'`);
-    console.log(`[CONSUME] Message IDs:`, transfers.map((t: any) => t.messageId).join(', '));
+    console.warn(`[CONSUME] Delivered ${transfers.length} transfers to consumer '${consumerId}'`);
+    console.warn(`[CONSUME] Message IDs:`, transfers.map((t: any) => t.messageId).join(', '));
 
     return corsResponse(
       {

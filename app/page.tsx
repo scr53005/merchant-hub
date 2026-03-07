@@ -7,6 +7,7 @@ interface ConsumerGroup {
   name: string;
   consumers: number;
   pending: number;
+  undelivered: number;
   lastDeliveredId: string;
 }
 
@@ -210,9 +211,9 @@ export default function Dashboard() {
               </h2>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 {data.restaurants.map(r => {
-                  const totalPending = r.stream.consumerGroups.reduce((sum, g) => sum + g.pending, 0);
+                  const totalUndelivered = r.stream.consumerGroups.reduce((sum, g) => sum + g.undelivered, 0);
                   const streamStatus: 'green' | 'yellow' | 'red' = r.stream.error ? 'red'
-                    : totalPending > 10 ? 'yellow'
+                    : totalUndelivered > 10 ? 'yellow'
                     : 'green';
 
                   return (
@@ -241,9 +242,9 @@ export default function Dashboard() {
                           <div>
                             <span className="text-xs text-zinc-500">Pending</span>
                             <p className={`font-mono text-lg font-bold ${
-                              totalPending > 0 ? 'text-yellow-400' : 'text-emerald-400'
+                              totalUndelivered > 0 ? 'text-yellow-400' : 'text-emerald-400'
                             }`}>
-                              {totalPending}
+                              {totalUndelivered}
                             </p>
                           </div>
                           <div>
@@ -268,8 +269,8 @@ export default function Dashboard() {
                                 <span className="font-mono">{g.name}</span>
                                 <span className="text-zinc-400">
                                   {g.consumers} consumer{g.consumers !== 1 ? 's' : ''}, {' '}
-                                  <span className={g.pending > 0 ? 'text-yellow-400' : 'text-emerald-400'}>
-                                    {g.pending} pending
+                                  <span className={g.undelivered > 0 ? 'text-yellow-400' : 'text-emerald-400'}>
+                                    {g.undelivered} pending
                                   </span>
                                 </span>
                               </div>
@@ -319,7 +320,7 @@ export default function Dashboard() {
                     <div key={g.name} className="flex items-center justify-between text-xs bg-zinc-800/50 rounded px-2 py-1">
                       <span className="font-mono">{g.name}</span>
                       <span className="text-zinc-400">
-                        {g.pending} pending
+                        {g.undelivered} pending
                       </span>
                     </div>
                   ))}

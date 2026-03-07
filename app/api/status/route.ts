@@ -16,7 +16,8 @@ import { RESTAURANTS, POLLING_CONFIG, REDIS_KEYS } from '@/lib/config';
 interface ConsumerGroupInfo {
   name: string;
   consumers: number;
-  pending: number;
+  pending: number;       // Redis native: delivered but not ACK'd (rarely useful)
+  undelivered: number;   // Messages in stream not yet delivered to this group
   lastDeliveredId: string;
 }
 
@@ -24,6 +25,24 @@ interface StreamInfo {
   length: number;
   consumerGroups: ConsumerGroupInfo[];
   error?: string;
+}
+
+// Count messages in stream that haven't been delivered to a consumer group yet.
+// Uses XRANGE from (lastDeliveredId+1) to end — fine for streams of hundreds of entries.
+async function countUndelivered(streamKey: string, lastDeliveredId: string, streamLength: number): Promise<number> {
+  if (!lastDeliveredId || lastDeliveredId === '0' || lastDeliveredId === '0-0') {
+    // Group just created, nothing delivered yet → everything is undelivered
+    return streamLength;
+  }
+  try {
+    // Make the range exclusive by incrementing the sequence number
+    const parts = lastDeliveredId.split('-');
+    const exclusiveStart = `${parts[0]}-${parseInt(parts[1] || '0') + 1}`;
+    const entries = await execRaw<any[]>(['XRANGE', streamKey, exclusiveStart, '+']);
+    return Array.isArray(entries) ? entries.length : 0;
+  } catch {
+    return 0;
+  }
 }
 
 async function getStreamInfo(streamKey: string): Promise<StreamInfo> {
@@ -34,7 +53,7 @@ async function getStreamInfo(streamKey: string): Promise<StreamInfo> {
     try {
       const groups = await execRaw<any[]>(['XINFO', 'GROUPS', streamKey]);
       if (Array.isArray(groups)) {
-        consumerGroups = groups.map((g: any) => {
+        const parsed = groups.map((g: any) => {
           // XINFO GROUPS returns alternating key-value pairs or objects depending on Redis version
           if (Array.isArray(g)) {
             const obj: Record<string, any> = {};
@@ -56,6 +75,13 @@ async function getStreamInfo(streamKey: string): Promise<StreamInfo> {
             lastDeliveredId: String(g['last-delivered-id'] || g.lastDeliveredId || '0'),
           };
         });
+        // Compute undelivered count for each group
+        consumerGroups = await Promise.all(
+          parsed.map(async (g) => ({
+            ...g,
+            undelivered: await countUndelivered(streamKey, g.lastDeliveredId, length),
+          }))
+        );
       }
     } catch {
       // Stream exists but no consumer groups yet — that's fine

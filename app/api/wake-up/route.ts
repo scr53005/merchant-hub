@@ -3,7 +3,7 @@
 // Returns status and whether this shop should start polling
 
 import { NextResponse } from 'next/server';
-import { getPollingState, getHeartbeatFromState, getPollerFromState, attemptTakeoverAsPollerV2, updatePollingState, publishSystemBroadcast } from '@/lib/redis';
+import { getPollingState, getHeartbeatFromState, getPollerFromState, attemptTakeoverAsPollerV2, updatePollingState, publishSystemBroadcast, execRaw } from '@/lib/redis';
 import { POLLING_CONFIG } from '@/lib/config';
 import { handleCorsPreflight, corsResponse } from '@/lib/cors';
 
@@ -45,7 +45,15 @@ export async function POST(request: Request) {
       }, request);
     }
 
-    // Polling is not active, attempt to become the poller
+    // Polling is not active — clear any zombie poller lock before attempting takeover.
+    // The lock key uses NX (set-if-not-exists), so a stale lock from a dead tab
+    // would block new CO pages from taking over until its 30s TTL expires.
+    const lockTTL = await execRaw<number>(['TTL', 'polling:poller']);
+    if (lockTTL > 0) {
+      console.warn(`[wake-up] Stale heartbeat but lock still alive (TTL ${lockTTL}s) — clearing zombie poller "${currentPoller}"`);
+      await execRaw(['DEL', 'polling:poller']);
+    }
+
     // Add random delay for collision avoidance (Ethernet-like)
     const randomDelay = Math.floor(Math.random() * POLLING_CONFIG.TAKEOVER_DELAY_MAX);
     await new Promise(resolve => setTimeout(resolve, randomDelay));

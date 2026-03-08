@@ -34,7 +34,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const streamKey = `transfers:${restaurantId}`;
+    const streamKey = `transfers:${restaurantId}:${env}`;
     const groupName = `${restaurantId}-${env}-consumers`;
 
     console.warn(`[ACK] Acknowledging ${messageIds.length} messages for ${streamKey} (group: ${groupName}, env: ${env})`);

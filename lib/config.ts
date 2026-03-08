@@ -78,6 +78,6 @@ export const REDIS_KEYS = {
   POLLER: 'polling:poller',
   MODE: 'polling:mode',
   LAST_ID: (restaurantId: string, currency: string) => `lastId:${restaurantId}:${currency}`,
-  TRANSFERS_STREAM: (restaurantId: string) => `transfers:${restaurantId}`,
+  TRANSFERS_STREAM: (restaurantId: string, env: 'prod' | 'dev') => `transfers:${restaurantId}:${env}`,
   SYSTEM_BROADCAST: 'system:broadcasts',
 };

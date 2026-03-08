@@ -59,9 +59,9 @@ export async function setLastId(restaurantId: string, currency: string, id: stri
   await redis.set(`lastId:${restaurantId}:${currency}`, id);
 }
 
-export async function publishTransfer(restaurantId: string, transfer: any): Promise<void> {
-  // Publish transfer to restaurant-specific Redis Stream
-  await redis.xadd(`transfers:${restaurantId}`, '*', transfer);
+export async function publishTransfer(restaurantId: string, env: 'prod' | 'dev', transfer: any): Promise<void> {
+  // Publish transfer to environment-specific Redis Stream
+  await redis.xadd(`transfers:${restaurantId}:${env}`, '*', transfer);
 }
 
 export async function publishSystemBroadcast(broadcast: {

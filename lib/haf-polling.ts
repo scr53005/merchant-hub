@@ -68,10 +68,12 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
       console.log(`[POLLING] Updated ${Object.keys(lastIdUpdates).length} lastId values in single hash`);
     }
 
-    // Publish transfers to Redis Streams (grouped by restaurant)
-    // Co pages will filter by account name if they need environment-specific filtering
+    // Publish transfers to environment-specific Redis Streams
     for (const transfer of allTransfers) {
-      await publishTransfer(transfer.restaurant_id, transfer);
+      // Look up the env for this transfer's to_account
+      const context = accountToContext.get(transfer.to_account);
+      const env = context?.env || 'prod';
+      await publishTransfer(transfer.restaurant_id, env, transfer);
     }
 
     console.log(`[POLLING] Total transfers found: ${allTransfers.length}`);

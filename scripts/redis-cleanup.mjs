@@ -9,7 +9,7 @@
 // Commands:
 //   list-groups                          List all consumer groups for all restaurant streams
 //   destroy-group <stream> <group>       Destroy a specific consumer group
-//   destroy-legacy-groups                Destroy pre-split legacy groups (e.g. indies-consumers)
+//   destroy-legacy-groups                Destroy groups on old shared streams (pre env-split)
 //   poller-status                         Show current poller info (who, heartbeat age)
 //   clear-poller                          Kill zombie poller lock so next CO page can take over
 //
@@ -76,12 +76,20 @@ async function execRedis(command) {
 
 // ── Known streams ──────────────────────────────────────────────────────────
 
-const STREAMS = ['transfers:indies', 'transfers:croque-bedaine'];
+const STREAMS = [
+  'transfers:indies:prod', 'transfers:indies:dev',
+  'transfers:croque-bedaine:prod', 'transfers:croque-bedaine:dev',
+];
 
-// Legacy groups that predate the dev/prod consumer group split
+// Legacy streams (pre env-split) and groups to clean up
+const LEGACY_STREAMS = ['transfers:indies', 'transfers:croque-bedaine'];
 const LEGACY_GROUPS = [
   { stream: 'transfers:indies', group: 'indies-consumers' },
+  { stream: 'transfers:indies', group: 'indies-prod-consumers' },
+  { stream: 'transfers:indies', group: 'indies-dev-consumers' },
   { stream: 'transfers:croque-bedaine', group: 'croque-bedaine-consumers' },
+  { stream: 'transfers:croque-bedaine', group: 'croque-bedaine-prod-consumers' },
+  { stream: 'transfers:croque-bedaine', group: 'croque-bedaine-dev-consumers' },
 ];
 
 // ── Commands ───────────────────────────────────────────────────────────────
@@ -101,7 +109,8 @@ async function countUndelivered(stream, lastDeliveredId, streamLength) {
 }
 
 async function listGroups() {
-  for (const stream of STREAMS) {
+  const allStreams = [...STREAMS, ...LEGACY_STREAMS];
+  for (const stream of allStreams) {
     console.log(`\n--- ${stream} ---`);
     try {
       const len = await execRedis(['XLEN', stream]);
@@ -141,7 +150,7 @@ async function destroyGroup(stream, group) {
 }
 
 async function destroyLegacyGroups() {
-  console.log('Destroying legacy consumer groups (pre-dev/prod split)...\n');
+  console.log('Destroying legacy consumer groups from old shared streams...\n');
   for (const { stream, group } of LEGACY_GROUPS) {
     await destroyGroup(stream, group);
   }
@@ -218,7 +227,7 @@ Usage:
 Commands:
   list-groups                        List all consumer groups for all streams
   destroy-group <stream> <group>     Destroy a specific consumer group
-  destroy-legacy-groups              Destroy legacy pre-split groups
+  destroy-legacy-groups              Destroy groups on old shared streams
   poller-status                      Show current poller info
   clear-poller                       Kill zombie poller lock
 `);

@@ -29,7 +29,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const streamKey = `transfers:${restaurantId}`;
+    const streamKey = `transfers:${restaurantId}:${env}`;
     const groupName = `${restaurantId}-${env}-consumers`;
 
     console.warn(`[CONSUME] Consumer '${consumerId}' reading from ${streamKey} (group: ${groupName}, env: ${env})`);

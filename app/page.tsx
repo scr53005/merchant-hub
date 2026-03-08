@@ -22,7 +22,7 @@ interface RestaurantStatus {
   name: string;
   accounts: { prod: string; dev: string };
   currencies: string[];
-  stream: StreamInfo;
+  streams: { prod: StreamInfo; dev: StreamInfo };
   lastIds: {
     prod: Record<string, string>;
     dev: Record<string, string>;
@@ -211,9 +211,11 @@ export default function Dashboard() {
               </h2>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 {data.restaurants.map(r => {
-                  const totalUndelivered = r.stream.consumerGroups.reduce((sum, g) => sum + g.undelivered, 0);
-                  const streamStatus: 'green' | 'yellow' | 'red' = r.stream.error ? 'red'
-                    : totalUndelivered > 10 ? 'yellow'
+                  const prodUndelivered = r.streams.prod.consumerGroups.reduce((sum, g) => sum + g.undelivered, 0);
+                  const devUndelivered = r.streams.dev.consumerGroups.reduce((sum, g) => sum + g.undelivered, 0);
+                  const hasError = r.streams.prod.error || r.streams.dev.error;
+                  const streamStatus: 'green' | 'yellow' | 'red' = hasError ? 'red'
+                    : (prodUndelivered + devUndelivered) > 10 ? 'yellow'
                     : 'green';
 
                   return (
@@ -229,55 +231,56 @@ export default function Dashboard() {
                         <StatusDot status={streamStatus} />
                       </div>
 
-                      {/* Stream info */}
-                      <div className="mb-4">
-                        <p className="text-xs text-zinc-500 uppercase tracking-wider mb-2">
-                          Stream: transfers:{r.id}
-                        </p>
-                        <div className="flex gap-6">
-                          <div>
-                            <span className="text-xs text-zinc-500">Length</span>
-                            <p className="font-mono text-lg font-bold">{r.stream.length}</p>
-                          </div>
-                          <div>
-                            <span className="text-xs text-zinc-500">Pending</span>
-                            <p className={`font-mono text-lg font-bold ${
-                              totalUndelivered > 0 ? 'text-yellow-400' : 'text-emerald-400'
-                            }`}>
-                              {totalUndelivered}
+                      {/* Streams info — one row per env */}
+                      {(['prod', 'dev'] as const).map(env => {
+                        const stream = r.streams[env];
+                        const undelivered = stream.consumerGroups.reduce((sum, g) => sum + g.undelivered, 0);
+                        const envColor = env === 'prod' ? 'text-emerald-500' : 'text-blue-500';
+                        return (
+                          <div key={env} className="mb-3">
+                            <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">
+                              <span className={`font-bold ${envColor}`}>{env}</span> — transfers:{r.id}:{env}
                             </p>
-                          </div>
-                          <div>
-                            <span className="text-xs text-zinc-500">Groups</span>
-                            <p className="font-mono text-lg font-bold">
-                              {r.stream.consumerGroups.length}
-                            </p>
-                          </div>
-                        </div>
-                        {r.stream.error && (
-                          <p className="text-xs text-red-400 mt-1">Stream error: {r.stream.error}</p>
-                        )}
-                      </div>
-
-                      {/* Consumer groups */}
-                      {r.stream.consumerGroups.length > 0 && (
-                        <div className="mb-4">
-                          <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Consumer Groups</p>
-                          <div className="space-y-1">
-                            {r.stream.consumerGroups.map(g => (
-                              <div key={g.name} className="flex items-center justify-between text-xs bg-zinc-800/50 rounded px-2 py-1">
-                                <span className="font-mono">{g.name}</span>
-                                <span className="text-zinc-400">
-                                  {g.consumers} consumer{g.consumers !== 1 ? 's' : ''}, {' '}
-                                  <span className={g.undelivered > 0 ? 'text-yellow-400' : 'text-emerald-400'}>
-                                    {g.undelivered} pending
-                                  </span>
-                                </span>
+                            <div className="flex gap-6 ml-2">
+                              <div>
+                                <span className="text-xs text-zinc-500">Length</span>
+                                <p className="font-mono text-base font-bold">{stream.length}</p>
                               </div>
-                            ))}
+                              <div>
+                                <span className="text-xs text-zinc-500">Pending</span>
+                                <p className={`font-mono text-base font-bold ${
+                                  undelivered > 0 ? 'text-yellow-400' : 'text-emerald-400'
+                                }`}>
+                                  {undelivered}
+                                </p>
+                              </div>
+                              <div>
+                                <span className="text-xs text-zinc-500">Groups</span>
+                                <p className="font-mono text-base font-bold">{stream.consumerGroups.length}</p>
+                              </div>
+                            </div>
+                            {stream.error && (
+                              <p className="text-xs text-red-400 mt-1">Stream error: {stream.error}</p>
+                            )}
+                            {/* Consumer groups for this env */}
+                            {stream.consumerGroups.length > 0 && (
+                              <div className="mt-1 ml-2 space-y-1">
+                                {stream.consumerGroups.map(g => (
+                                  <div key={g.name} className="flex items-center justify-between text-xs bg-zinc-800/50 rounded px-2 py-1">
+                                    <span className="font-mono">{g.name}</span>
+                                    <span className="text-zinc-400">
+                                      {g.consumers} consumer{g.consumers !== 1 ? 's' : ''}, {' '}
+                                      <span className={g.undelivered > 0 ? 'text-yellow-400' : 'text-emerald-400'}>
+                                        {g.undelivered} pending
+                                      </span>
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
-                        </div>
-                      )}
+                        );
+                      })}
 
                       {/* LastIds */}
                       <div>

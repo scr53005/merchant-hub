@@ -115,8 +115,12 @@ export async function GET() {
     // Per-restaurant info
     const restaurants = await Promise.all(
       RESTAURANTS.map(async (r) => {
-        const streamKey = REDIS_KEYS.TRANSFERS_STREAM(r.id);
-        const stream = await getStreamInfo(streamKey);
+        const prodStreamKey = REDIS_KEYS.TRANSFERS_STREAM(r.id, 'prod');
+        const devStreamKey = REDIS_KEYS.TRANSFERS_STREAM(r.id, 'dev');
+        const [prodStream, devStream] = await Promise.all([
+          getStreamInfo(prodStreamKey),
+          getStreamInfo(devStreamKey),
+        ]);
 
         // Collect lastIds per account+currency from the polling state hash
         const lastIds: Record<string, Record<string, string>> = {
@@ -133,7 +137,7 @@ export async function GET() {
           name: r.name,
           accounts: r.accounts,
           currencies: r.currencies,
-          stream,
+          streams: { prod: prodStream, dev: devStream },
           lastIds,
         };
       })

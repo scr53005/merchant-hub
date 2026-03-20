@@ -19,12 +19,14 @@ const hafPool = new Pool({
   query_timeout: 8000, // 8s to stay under Vercel 10s limit
 });
 
-// Build set of all known accounts (prod + dev) for validation
+// Build set of all known accounts (primary + additional, prod + dev) for validation
 function getKnownAccounts(): Set<string> {
   const accounts = new Set<string>();
   for (const r of RESTAURANTS) {
     accounts.add(r.accounts.prod);
     accounts.add(r.accounts.dev);
+    for (const a of r.additionalAccounts?.prod || []) accounts.add(a);
+    for (const a of r.additionalAccounts?.dev || []) accounts.add(a);
   }
   return accounts;
 }
@@ -35,11 +37,11 @@ function getKnownAccounts(): Set<string> {
 const JOIN_STRATEGIES = [
   {
     name: 'hafsql.haf_operations (single join, timestamp direct)',
-    sql: `SELECT t.id, t.from_account, t.amount, t.memo,
+    sql: `SELECT t.id, t.from_account, t.to_account, t.amount, t.memo,
                  o.block_num, o.timestamp
           FROM hafsql.operation_transfer_table t
           JOIN hafsql.haf_operations o ON t.id = o.id
-          WHERE t.to_account = $1
+          WHERE t.to_account = ANY($1)
             AND t.symbol = 'HBD'
             AND o.timestamp >= $2::timestamp
             AND o.timestamp < $3::timestamp
@@ -48,11 +50,11 @@ const JOIN_STRATEGIES = [
   },
   {
     name: 'hive.operations (single join, timestamp direct)',
-    sql: `SELECT t.id, t.from_account, t.amount, t.memo,
+    sql: `SELECT t.id, t.from_account, t.to_account, t.amount, t.memo,
                  o.block_num, o.timestamp
           FROM hafsql.operation_transfer_table t
           JOIN hive.operations o ON t.id = o.id
-          WHERE t.to_account = $1
+          WHERE t.to_account = ANY($1)
             AND t.symbol = 'HBD'
             AND o.timestamp >= $2::timestamp
             AND o.timestamp < $3::timestamp
@@ -61,12 +63,12 @@ const JOIN_STRATEGIES = [
   },
   {
     name: 'hafsql.haf_operations → haf_blocks (double join fallback)',
-    sql: `SELECT t.id, t.from_account, t.amount, t.memo,
+    sql: `SELECT t.id, t.from_account, t.to_account, t.amount, t.memo,
                  o.block_num, b.created_at as timestamp
           FROM hafsql.operation_transfer_table t
           JOIN hafsql.haf_operations o ON t.id = o.id
           JOIN hafsql.haf_blocks b ON o.block_num = b.block_num
-          WHERE t.to_account = $1
+          WHERE t.to_account = ANY($1)
             AND t.symbol = 'HBD'
             AND b.created_at >= $2::timestamp
             AND b.created_at < $3::timestamp
@@ -86,29 +88,39 @@ export async function GET(request: NextRequest) {
   const t0 = Date.now();
   try {
     const { searchParams } = request.nextUrl;
-    const account = searchParams.get('account');
+    // Support both single `account` and comma-separated `accounts` param
+    const accountParam = searchParams.get('account');
+    const accountsParam = searchParams.get('accounts');
     const from = searchParams.get('from');
     const to = searchParams.get('to');
 
-    console.log(`[REPORTING] === New request: account=${account} from=${from} to=${to} ===`);
+    // Parse accounts list: prefer `accounts` (comma-separated), fall back to single `account`
+    const accounts = accountsParam
+      ? accountsParam.split(',').map(s => s.trim()).filter(Boolean)
+      : accountParam
+        ? [accountParam]
+        : [];
+
+    console.log(`[REPORTING] === New request: accounts=${accounts.join(',')} from=${from} to=${to} ===`);
 
     // Validate required params
-    if (!account || !from || !to) {
+    if (accounts.length === 0 || !from || !to) {
       console.log('[REPORTING] Missing required parameters');
       return corsResponse(
-        { error: 'Missing required parameters: account, from, to' },
+        { error: 'Missing required parameters: account (or accounts), from, to' },
         request,
         { status: 400 }
       );
     }
 
-    // Validate account against known restaurant accounts
+    // Validate all accounts against known restaurant accounts
     const knownAccounts = getKnownAccounts();
     console.log(`[REPORTING] Known accounts: ${[...knownAccounts].join(', ')}`);
-    if (!knownAccounts.has(account)) {
-      console.log(`[REPORTING] REJECTED: unknown account "${account}"`);
+    const unknownAccounts = accounts.filter(a => !knownAccounts.has(a));
+    if (unknownAccounts.length > 0) {
+      console.log(`[REPORTING] REJECTED: unknown account(s) "${unknownAccounts.join(', ')}"`);
       return corsResponse(
-        { error: 'Unknown account' },
+        { error: `Unknown account(s): ${unknownAccounts.join(', ')}` },
         request,
         { status: 403 }
       );
@@ -152,8 +164,8 @@ export async function GET(request: NextRequest) {
       const tQuery = Date.now();
       try {
         console.log(`[REPORTING] Trying strategy ${i + 1}/${strategiesToTry.length}: "${strategy.name}"`);
-        console.log(`[REPORTING]   SQL params: [$1=${account}, $2=${from}, $3=${toExclusiveStr}, $4=${LIMIT}]`);
-        const result = await hafPool.query(strategy.sql, [account, from, toExclusiveStr, LIMIT]);
+        console.log(`[REPORTING]   SQL params: [$1=${accounts.join(',')}, $2=${from}, $3=${toExclusiveStr}, $4=${LIMIT}]`);
+        const result = await hafPool.query(strategy.sql, [accounts, from, toExclusiveStr, LIMIT]);
         rows = result.rows;
         usedStrategy = strategy.name;
         workingStrategyIndex = JOIN_STRATEGIES.indexOf(strategy);
@@ -222,6 +234,7 @@ export async function GET(request: NextRequest) {
       id: row.id.toString(),
       timestamp: row.timestamp ? new Date(row.timestamp).toISOString() : null,
       from_account: row.from_account,
+      to_account: row.to_account,
       amount: row.amount,
       memo: row.memo || '',
       block_num: row.block_num ? Number(row.block_num) : undefined,
@@ -231,7 +244,7 @@ export async function GET(request: NextRequest) {
     console.log(`[REPORTING] === Done: ${transactions.length} transactions, truncated=${transactions.length >= LIMIT}, ${elapsed}ms total ===`);
 
     return corsResponse({
-      account,
+      accounts,
       from,
       to,
       transactions,

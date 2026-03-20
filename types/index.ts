@@ -7,6 +7,10 @@ export interface RestaurantConfig {
     prod: string;
     dev: string;
   };
+  additionalAccounts?: {
+    prod?: string[];
+    dev?: string[];
+  };
   currencies: Currency[];
   memoFilters: {
     [key in Currency]?: string;

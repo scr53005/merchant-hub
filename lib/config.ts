@@ -2,6 +2,11 @@
 
 import { RestaurantConfig } from '@/types';
 
+// Parse comma-separated env var into array of account names
+function parseAdditionalAccounts(envVar?: string): string[] {
+  return (envVar || '').split(',').map(s => s.trim()).filter(Boolean);
+}
+
 export const RESTAURANTS: RestaurantConfig[] = [
   {
     id: 'indies',
@@ -9,6 +14,10 @@ export const RESTAURANTS: RestaurantConfig[] = [
     accounts: {
       prod: (process.env.INDIES_ACCOUNT || 'indies.cafe').trim(),
       dev: (process.env.INDIES_DEV_ACCOUNT || 'indies-test').trim(),
+    },
+    additionalAccounts: {
+      prod: parseAdditionalAccounts(process.env.INDIES_ADDITIONAL_PROD_ACCOUNTS),
+      dev: parseAdditionalAccounts(process.env.INDIES_ADDITIONAL_DEV_ACCOUNTS),
     },
     currencies: ['HBD', 'EURO', 'OCLT'],
     memoFilters: {
@@ -24,6 +33,10 @@ export const RESTAURANTS: RestaurantConfig[] = [
     accounts: {
       prod: (process.env.CROQUE_ACCOUNT || 'croque.bedaine').trim(),
       dev: (process.env.CROQUE_DEV_ACCOUNT || 'croque-test').trim(),
+    },
+    additionalAccounts: {
+      prod: parseAdditionalAccounts(process.env.CROQUE_ADDITIONAL_PROD_ACCOUNTS),
+      dev: parseAdditionalAccounts(process.env.CROQUE_ADDITIONAL_DEV_ACCOUNTS),
     },
     currencies: ['HBD', 'EURO', 'OCLT'],
     memoFilters: {
@@ -42,22 +55,23 @@ export function getRestaurantAccount(restaurant: RestaurantConfig): string {
     : restaurant.accounts.dev;
 }
 
-// Get ALL accounts (both prod and dev) for batched polling
+// Get ALL accounts (primary + additional, both prod and dev) for batched polling
 // Since we're using O(1) batched queries, querying all accounts has negligible cost
 export function getAllAccounts(): { account: string; restaurant: RestaurantConfig; env: 'prod' | 'dev' }[] {
   const allAccounts: { account: string; restaurant: RestaurantConfig; env: 'prod' | 'dev' }[] = [];
 
   for (const restaurant of RESTAURANTS) {
-    allAccounts.push({
-      account: restaurant.accounts.prod,
-      restaurant,
-      env: 'prod'
-    });
-    allAccounts.push({
-      account: restaurant.accounts.dev,
-      restaurant,
-      env: 'dev'
-    });
+    // Primary accounts (always present)
+    allAccounts.push({ account: restaurant.accounts.prod, restaurant, env: 'prod' });
+    allAccounts.push({ account: restaurant.accounts.dev, restaurant, env: 'dev' });
+
+    // Additional accounts (same restaurant, same stream)
+    for (const account of restaurant.additionalAccounts?.prod || []) {
+      allAccounts.push({ account, restaurant, env: 'prod' });
+    }
+    for (const account of restaurant.additionalAccounts?.dev || []) {
+      allAccounts.push({ account, restaurant, env: 'dev' });
+    }
   }
 
   return allAccounts;

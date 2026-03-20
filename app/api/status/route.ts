@@ -123,6 +123,7 @@ export async function GET() {
         ]);
 
         // Collect lastIds per account+currency from the polling state hash
+        // Primary accounts: keyed by currency for backward compat with dashboard
         const lastIds: Record<string, Record<string, string>> = {
           prod: {},
           dev: {},
@@ -132,13 +133,28 @@ export async function GET() {
           lastIds.dev[currency] = getLastIdFromState(pollingState, r.accounts.dev, currency);
         }
 
+        // Additional accounts: keyed by "account:currency"
+        const additionalLastIds: Record<string, Record<string, string>> = { prod: {}, dev: {} };
+        for (const account of r.additionalAccounts?.prod || []) {
+          for (const currency of r.currencies) {
+            additionalLastIds.prod[`${account}:${currency}`] = getLastIdFromState(pollingState, account, currency);
+          }
+        }
+        for (const account of r.additionalAccounts?.dev || []) {
+          for (const currency of r.currencies) {
+            additionalLastIds.dev[`${account}:${currency}`] = getLastIdFromState(pollingState, account, currency);
+          }
+        }
+
         return {
           id: r.id,
           name: r.name,
           accounts: r.accounts,
+          additionalAccounts: r.additionalAccounts,
           currencies: r.currencies,
           streams: { prod: prodStream, dev: devStream },
           lastIds,
+          additionalLastIds,
         };
       })
     );

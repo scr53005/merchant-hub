@@ -46,6 +46,24 @@ export const RESTAURANTS: RestaurantConfig[] = [
       OCLT: '%-inno-%',
     },
   },
+  {
+    id: 'millewee',
+    name: 'Café-Brasserie Millewee',
+    accounts: {
+      prod: (process.env.MILLEWEE_ACCOUNT || 'millewee').trim(),
+      dev: (process.env.MILLEWEE_DEV_ACCOUNT || 'innodemo').trim(),
+    },
+    additionalAccounts: {
+      prod: parseAdditionalAccounts(process.env.MILLEWEE_ADDITIONAL_PROD_ACCOUNTS),
+      dev: parseAdditionalAccounts(process.env.MILLEWEE_ADDITIONAL_DEV_ACCOUNTS),
+    },
+    currencies: ['HBD', 'EURO', 'OCLT'],
+    memoFilters: {
+      HBD: '%-inno-%',
+      EURO: '%-inno-%',
+      OCLT: '%-inno-%',
+    },
+  },
 ];
 
 // Get the appropriate account based on environment

@@ -74,23 +74,47 @@ async function execRedis(command) {
   return data.result;
 }
 
-// ── Known streams ──────────────────────────────────────────────────────────
+// ── Stream discovery ───────────────────────────────────────────────────────
+// We discover streams dynamically via SCAN instead of hardcoding, so the script
+// stays correct as new spokes are added and catches orphaned streams that no
+// longer correspond to any restaurant in config.ts.
 
-const STREAMS = [
-  'transfers:indies:prod', 'transfers:indies:dev',
-  'transfers:croque-bedaine:prod', 'transfers:croque-bedaine:dev',
-];
+// Current stream pattern: `transfers:{restaurantId}:{prod|dev}` (post env-split).
+// Legacy stream pattern:  `transfers:{restaurantId}` (pre env-split, pre-April 2026).
+async function discoverTransferStreams() {
+  const active = []; // { stream, restaurantId, env }
+  const legacy = []; // { stream, restaurantId }
+  let cursor = '0';
 
-// Legacy streams (pre env-split) and groups to clean up
-const LEGACY_STREAMS = ['transfers:indies', 'transfers:croque-bedaine'];
-const LEGACY_GROUPS = [
-  { stream: 'transfers:indies', group: 'indies-consumers' },
-  { stream: 'transfers:indies', group: 'indies-prod-consumers' },
-  { stream: 'transfers:indies', group: 'indies-dev-consumers' },
-  { stream: 'transfers:croque-bedaine', group: 'croque-bedaine-consumers' },
-  { stream: 'transfers:croque-bedaine', group: 'croque-bedaine-prod-consumers' },
-  { stream: 'transfers:croque-bedaine', group: 'croque-bedaine-dev-consumers' },
-];
+  do {
+    // Upstash SCAN: [cursor, [keys...]]
+    const result = await execRedis(['SCAN', cursor, 'MATCH', 'transfers:*', 'COUNT', '100']);
+    cursor = result[0];
+    const keys = result[1] || [];
+
+    for (const key of keys) {
+      // Verify TYPE — SCAN MATCH doesn't filter by type, so guard against accidental
+      // non-stream keys sharing the prefix.
+      const type = await execRedis(['TYPE', key]);
+      if (type !== 'stream') continue;
+
+      const parts = key.split(':');
+      // transfers:{id}:{env} → parts.length === 3
+      // transfers:{id}       → parts.length === 2
+      if (parts.length === 3 && (parts[2] === 'prod' || parts[2] === 'dev')) {
+        active.push({ stream: key, restaurantId: parts[1], env: parts[2] });
+      } else if (parts.length === 2) {
+        legacy.push({ stream: key, restaurantId: parts[1] });
+      }
+      // Anything else is an unrecognised shape — skip silently.
+    }
+  } while (cursor !== '0');
+
+  // Stable ordering for readable output
+  active.sort((a, b) => (a.stream < b.stream ? -1 : 1));
+  legacy.sort((a, b) => (a.stream < b.stream ? -1 : 1));
+  return { active, legacy };
+}
 
 // ── Commands ───────────────────────────────────────────────────────────────
 
@@ -108,30 +132,45 @@ async function countUndelivered(stream, lastDeliveredId, streamLength) {
   }
 }
 
-async function listGroups() {
-  const allStreams = [...STREAMS, ...LEGACY_STREAMS];
-  for (const stream of allStreams) {
-    console.log(`\n--- ${stream} ---`);
-    try {
-      const len = await execRedis(['XLEN', stream]);
-      console.log(`  Length: ${len}`);
-      const groups = await execRedis(['XINFO', 'GROUPS', stream]);
-      if (!groups || groups.length === 0) {
-        console.log('  No consumer groups');
-        continue;
-      }
-      for (const g of groups) {
-        // Upstash returns objects directly
-        const name = g.name || g[1];
-        const consumers = g.consumers ?? g[3];
-        const pending = g.pending ?? g[5];
-        const lastId = g['last-delivered-id'] || g[7] || '0';
-        const undelivered = await countUndelivered(stream, lastId, len);
-        console.log(`  Group: ${name}  |  consumers: ${consumers}  |  undelivered: ${undelivered}  |  lastDeliveredId: ${lastId}`);
-      }
-    } catch (err) {
-      console.log(`  Error: ${err.message}`);
+async function printStreamInfo(stream) {
+  console.log(`\n--- ${stream} ---`);
+  try {
+    const len = await execRedis(['XLEN', stream]);
+    console.log(`  Length: ${len}`);
+    const groups = await execRedis(['XINFO', 'GROUPS', stream]);
+    if (!groups || groups.length === 0) {
+      console.log('  No consumer groups');
+      return;
     }
+    for (const g of groups) {
+      // Upstash returns objects directly
+      const name = g.name || g[1];
+      const consumers = g.consumers ?? g[3];
+      const lastId = g['last-delivered-id'] || g[7] || '0';
+      const undelivered = await countUndelivered(stream, lastId, len);
+      console.log(`  Group: ${name}  |  consumers: ${consumers}  |  undelivered: ${undelivered}  |  lastDeliveredId: ${lastId}`);
+    }
+  } catch (err) {
+    console.log(`  Error: ${err.message}`);
+  }
+}
+
+async function listGroups() {
+  const { active, legacy } = await discoverTransferStreams();
+
+  if (active.length === 0 && legacy.length === 0) {
+    console.log('\nNo transfer streams found in Redis.');
+    return;
+  }
+
+  if (active.length > 0) {
+    console.log('\n═══ Active streams (env-split) ═══');
+    for (const { stream } of active) await printStreamInfo(stream);
+  }
+
+  if (legacy.length > 0) {
+    console.log('\n═══ Legacy streams (pre env-split — candidates for cleanup) ═══');
+    for (const { stream } of legacy) await printStreamInfo(stream);
   }
 }
 
@@ -150,10 +189,31 @@ async function destroyGroup(stream, group) {
 }
 
 async function destroyLegacyGroups() {
-  console.log('Destroying legacy consumer groups from old shared streams...\n');
-  for (const { stream, group } of LEGACY_GROUPS) {
-    await destroyGroup(stream, group);
+  console.log('Discovering legacy streams (pre env-split)...\n');
+  const { legacy } = await discoverTransferStreams();
+
+  if (legacy.length === 0) {
+    console.log('No legacy streams found — nothing to clean up.');
+    return;
   }
+
+  for (const { stream } of legacy) {
+    console.log(`\nLegacy stream: ${stream}`);
+    try {
+      const groups = await execRedis(['XINFO', 'GROUPS', stream]);
+      if (!groups || groups.length === 0) {
+        console.log('  No consumer groups — nothing to destroy.');
+        continue;
+      }
+      for (const g of groups) {
+        const name = g.name || g[1];
+        await destroyGroup(stream, name);
+      }
+    } catch (err) {
+      console.error(`  Failed to list groups: ${err.message}`);
+    }
+  }
+
   console.log('\nDone. Run "list-groups" to verify.');
 }
 

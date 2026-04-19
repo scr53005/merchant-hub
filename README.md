@@ -9,29 +9,45 @@ merchant-hub is a **centralized polling service** that monitors the Hive blockch
 ### Architecture
 
 ```
-┌───────────────────────────────────────────────┐
-│  merchant-hub (Vercel)                        │
-│  • System Health Dashboard (homepage)         │
-│  • Distributed polling coordination           │
-│  • HAF database polling (6s intervals)        │
-│  • Redis Streams for pub/sub                  │
-│  • Reporting API (HAFSQL transaction queries) │
-└───────────────────────────────────────────────┘
-           │                │
-           ▼                ▼
-┌─────────────────┐  ┌──────────────────────────┐
-│  Upstash Redis  │  │  HAFSQL (PostgreSQL)     │
-│  • Heartbeat    │  │  • operation_transfer_table│
-│  • Leader elect │  │  • haf_operations         │
-│  • Transfer Qs  │  │  • haf_blocks             │
-└─────────────────┘  └──────────────────────────┘
-     │                    │
-     ▼                    ▼
-┌──────────────┐  ┌──────────────┐
-│  indiesmenu  │  │ croque-bedaine│
-│  co page     │  │  co page      │
-└──────────────┘  └──────────────┘
+                  ┌────────────────────────────┐
+                  │  HAFSQL (PostgreSQL)       │
+                  │  • operation_transfer_table│
+                  │  • haf_operations          │
+                  │  • haf_blocks              │
+                  └────────────────────────────┘
+                              │
+                              │ SELECT (every 6s while a CO
+                              │ page drives the poller loop)
+                              ▼
+       ┌───────────────────────────────────────────────┐
+       │  merchant-hub (Vercel)                        │
+       │  • System Health Dashboard (homepage)         │
+       │  • Distributed polling coordination           │
+       │  • HAF database polling (6s intervals)        │
+       │  • Publishes matched transfers → Redis        │
+       │  • Reporting API (HAFSQL transaction queries) │
+       └───────────────────────────────────────────────┘
+                              │
+                              │ XADD transfers:{restaurant}:{env}
+                              ▼
+                  ┌────────────────────────────┐
+                  │  Upstash Redis             │
+                  │  • Heartbeat / poller lock │
+                  │  • Per-restaurant streams  │
+                  │  • System broadcast stream │
+                  └────────────────────────────┘
+                     │          │          │
+           XREADGROUP │          │          │ XREADGROUP
+                     ▼          ▼          ▼
+           ┌──────────────┐ ┌────────────┐ ┌──────────────┐
+           │  indiesmenu  │ │  millewee  │ │croque-bedaine│
+           │  CO page     │ │  CO page   │ │  CO page     │
+           └──────────────┘ └────────────┘ └──────────────┘
 ```
+
+Only one CO page across all spokes wins the poller election at any given time
+and drives the HAF→Redis pipeline; the rest consume from their own per-restaurant
+Redis stream.
 
 ## Features
 
@@ -378,6 +394,7 @@ MIT
 
 - [innopay](https://github.com/YOUR_USERNAME/innopay) - Payment hub
 - [indiesmenu](https://github.com/YOUR_USERNAME/indiesmenu) - Indies restaurant system
+- [millewee](https://github.com/YOUR_USERNAME/millewee) - Millewee brasserie restaurant system
 - [croque-bedaine](https://github.com/YOUR_USERNAME/croque-bedaine) - Croque Bedaine restaurant system
 
 ## Support

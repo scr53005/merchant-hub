@@ -157,7 +157,7 @@ Query HAFSQL for historical HBD transfers to a restaurant account. Used by spoke
       "timestamp": "2025-03-15T12:30:00.000Z",
       "from_account": "customer1",
       "amount": "5.000",
-      "memo": "TABLE 4",
+      "memo": "TABLE 5",
       "block_num": 80000000
     }
   ],

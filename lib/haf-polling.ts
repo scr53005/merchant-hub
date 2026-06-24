@@ -61,6 +61,10 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
     const ocltTransfers = await pollHiveEngineTokenBatched('OCLT', accountList, accountToContext, pollingState, lastIdUpdates);
     allTransfers.push(...ocltTransfers);
 
+    // Poll LEI (Zenbar's RON-pegged IOU token) - ONE query for all accounts
+    const leiTransfers = await pollHiveEngineTokenBatched('LEI', accountList, accountToContext, pollingState, lastIdUpdates);
+    allTransfers.push(...leiTransfers);
+
     // Update all lastIds in one operation
     // Redis cost: 1 HMSET (updates all changed lastIds at once)
     if (Object.keys(lastIdUpdates).length > 0) {
@@ -200,7 +204,7 @@ async function pollHBDBatched(
  * NEW: Uses polling state object instead of individual Redis calls
  */
 async function pollHiveEngineTokenBatched(
-  symbol: 'EURO' | 'OCLT',
+  symbol: 'EURO' | 'OCLT' | 'LEI',
   allAccounts: string[],
   accountToContext: Map<string, { restaurant: RestaurantConfig; env: 'prod' | 'dev' }>,
   pollingState: any,

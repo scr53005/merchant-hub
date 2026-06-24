@@ -64,6 +64,26 @@ export const RESTAURANTS: RestaurantConfig[] = [
       OCLT: '%-inno-%',
     },
   },
+  {
+    // Romania spoke: prices in RON, IOU token is LEI (not EURO). Dedicated dev account
+    // zenbar-test (NOT shared innodemo). See project_zenbar_spoke memory.
+    id: 'zenbar',
+    name: 'Zen Bar',
+    accounts: {
+      prod: (process.env.ZENBAR_ACCOUNT || 'zenbar').trim(),
+      dev: (process.env.ZENBAR_DEV_ACCOUNT || 'zenbar-test').trim(),
+    },
+    additionalAccounts: {
+      prod: parseAdditionalAccounts(process.env.ZENBAR_ADDITIONAL_PROD_ACCOUNTS),
+      dev: parseAdditionalAccounts(process.env.ZENBAR_ADDITIONAL_DEV_ACCOUNTS),
+    },
+    currencies: ['HBD', 'LEI', 'OCLT'],
+    memoFilters: {
+      HBD: '%-inno-%',
+      LEI: '%-inno-%',
+      OCLT: '%-inno-%',
+    },
+  },
 ];
 
 // Get the appropriate account based on environment

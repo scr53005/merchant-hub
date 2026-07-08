@@ -34,11 +34,15 @@ export async function GET() {
     // No active poller, this cron is the fallback
     console.log('[cron-poll] No active poller detected, polling as fallback');
 
-    // Update state: mode and heartbeat
+    // Update state: mode and cron timestamp.
+    // Deliberately NOT the shared `heartbeat` field: refreshing it here made
+    // /api/wake-up answer "already-active by <dead poller>" for 15s after every
+    // cron run, delaying CO-page takeover. `heartbeat` now means exactly one
+    // thing: a live 6s poll loop.
     // Redis cost: 1 HMSET
     await updatePollingState({
       mode: 'sleeping-1min',
-      heartbeat: now,
+      cronLastPoll: now,
     });
 
     // Broadcast that we're in sleeping mode

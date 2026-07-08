@@ -34,11 +34,13 @@ export async function POST(request: Request) {
     // Check if polling is active (heartbeat is fresh)
     const isPollingActive = heartbeat && (now - heartbeat < POLLING_CONFIG.HEARTBEAT_TIMEOUT);
 
-    if (isPollingActive && currentPoller) {
-      // Polling is already active by another shop
+    if (isPollingActive) {
+      // Polling is already active by another shop. A fresh heartbeat means a live
+      // 6s poll loop even if the poller name is momentarily missing from the hash —
+      // never steal the lock in that case.
       return corsResponse({
         status: 'already-active',
-        message: `Polling is already active by ${currentPoller}`,
+        message: `Polling is already active by ${currentPoller || 'unknown'}`,
         poller: currentPoller,
         shouldStartPolling: false,
         heartbeat,
@@ -52,6 +54,13 @@ export async function POST(request: Request) {
     if (lockTTL > 0) {
       console.warn(`[wake-up] Stale heartbeat but lock still alive (TTL ${lockTTL}s) — clearing zombie poller "${currentPoller}"`);
       await execRaw(['DEL', 'polling:poller']);
+    }
+
+    // Also drop the dead poller's name from the state hash. It is display-only,
+    // but a stale name misled the 2026-07 millewee incident diagnosis ("inactive,
+    // poller: indies-current-orders" days after that tab closed).
+    if (currentPoller) {
+      await execRaw(['HDEL', 'polling:state', 'poller']);
     }
 
     // Add random delay for collision avoidance (Ethernet-like)

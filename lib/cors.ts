@@ -6,11 +6,14 @@ import { NextResponse } from 'next/server';
 /**
  * Check if an origin is allowed
  * Allows:
- * - Production co pages (indies.innopay.lu, croque-bedaine.innopay.lu)
+ * - Any first-party innopay.lu subdomain (all spoke CO pages live there;
+ *   a hand-maintained per-spoke list silently broke millewee's poller
+ *   election in production — 2026-07 incident)
  * - Development servers (localhost, 127.0.0.1, 192.168.x.x)
- * - Custom origins from ALLOWED_ORIGINS env var
+ * - Custom origins from ALLOWED_ORIGINS env var (escape hatch for future
+ *   spokes hosted outside innopay.lu, e.g. a widget on a merchant's own domain)
  */
-function isOriginAllowed(origin: string | null): boolean {
+export function isOriginAllowed(origin: string | null): boolean {
   if (!origin) return false;
 
   // Check custom allowed origins from env
@@ -19,12 +22,8 @@ function isOriginAllowed(origin: string | null): boolean {
     return true;
   }
 
-  // Allow production co pages
-  const productionOrigins = [
-    'https://indies.innopay.lu',
-    'https://croque-bedaine.innopay.lu',
-  ];
-  if (productionOrigins.includes(origin)) {
+  // Allow all first-party innopay.lu subdomains (https only, no port)
+  if (/^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.innopay\.lu$/.test(origin)) {
     return true;
   }
 

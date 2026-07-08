@@ -103,6 +103,7 @@ export async function GET() {
     const now = Date.now();
 
     // Polling status
+    const cronLastPoll = pollingState.cronLastPoll ? parseInt(pollingState.cronLastPoll, 10) : null;
     const polling = {
       heartbeat,
       isActive: heartbeat !== null && (now - heartbeat) < POLLING_CONFIG.HEARTBEAT_TIMEOUT,
@@ -110,6 +111,8 @@ export async function GET() {
       mode,
       timeSinceLastPoll: heartbeat ? now - heartbeat : null,
       heartbeatTimeout: POLLING_CONFIG.HEARTBEAT_TIMEOUT,
+      cronLastPoll,
+      timeSinceCronPoll: cronLastPoll ? now - cronLastPoll : null,
     };
 
     // Per-restaurant info

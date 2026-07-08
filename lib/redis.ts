@@ -111,7 +111,8 @@ export async function execRaw<T = any>(command: string[]): Promise<T> {
 const POLLING_STATE_KEY = 'polling:state';
 
 export interface PollingState {
-  heartbeat?: string;  // Stored as string in Redis
+  heartbeat?: string;  // Stored as string in Redis. ONLY refreshed by a live 6s poll loop.
+  cronLastPoll?: string; // Last cron fallback poll (kept separate from heartbeat on purpose)
   poller?: string;
   mode?: 'active-6s' | 'sleeping-1min';
   // Dynamic lastId fields: "{account}:{currency}" -> id

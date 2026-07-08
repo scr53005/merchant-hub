@@ -38,6 +38,8 @@ interface StatusData {
     mode: string | null;
     timeSinceLastPoll: number | null;
     heartbeatTimeout: number;
+    cronLastPoll: number | null;
+    timeSinceCronPoll: number | null;
   };
   restaurants: RestaurantStatus[];
   systemBroadcasts: StreamInfo;
@@ -172,7 +174,7 @@ export default function Dashboard() {
                   {data.polling.isActive ? 'ACTIVE' : 'INACTIVE'}
                 </span>
               </div>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 <div>
                   <p className="text-xs text-zinc-500 uppercase tracking-wider">Mode</p>
                   <p className="font-mono text-sm mt-1">
@@ -186,12 +188,29 @@ export default function Dashboard() {
                   </p>
                 </div>
                 <div>
-                  <p className="text-xs text-zinc-500 uppercase tracking-wider">Last Poll</p>
+                  <p className="text-xs text-zinc-500 uppercase tracking-wider">Last Poll (6s loop)</p>
                   <p className={`font-mono text-sm mt-1 ${
                     data.polling.timeSinceLastPoll && data.polling.timeSinceLastPoll > data.polling.heartbeatTimeout
                       ? 'text-yellow-400' : ''
                   }`}>
                     {formatMs(data.polling.timeSinceLastPoll)} ago
+                  </p>
+                </div>
+                <div>
+                  {/* Cron runs every 5 min ONLY when no 6s poller is alive — the safety net
+                      that catches orders while all CO pages are closed. While a live poller
+                      is active the cron correctly skips, so staleness only alarms (red past
+                      12 min = two missed beats) when the engine is inactive. */}
+                  <p className="text-xs text-zinc-500 uppercase tracking-wider">Cron Fallback</p>
+                  <p className={`font-mono text-sm mt-1 ${
+                    data.polling.isActive
+                      ? 'text-zinc-500'
+                      : data.polling.timeSinceCronPoll === null || data.polling.timeSinceCronPoll > 12 * 60_000
+                        ? 'text-red-400'
+                        : data.polling.timeSinceCronPoll > 6 * 60_000
+                          ? 'text-yellow-400' : ''
+                  }`}>
+                    {data.polling.timeSinceCronPoll === null ? 'never' : `${formatMs(data.polling.timeSinceCronPoll)} ago`}
                   </p>
                 </div>
                 <div>

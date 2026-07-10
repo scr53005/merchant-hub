@@ -7,6 +7,9 @@ import { getPollingState, getHeartbeatFromState, updatePollingState, publishSyst
 import { pollAllTransfers } from '@/lib/haf-polling';
 import { POLLING_CONFIG } from '@/lib/config';
 
+// Same budget as /api/poll — see the comment there
+export const maxDuration = 300;
+
 export async function GET() {
   const startTime = Date.now();
 

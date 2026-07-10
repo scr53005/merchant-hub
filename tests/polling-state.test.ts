@@ -6,7 +6,13 @@
 //   big numeric-string cursors into precision-lossy JS numbers.
 
 import { describe, it, expect } from 'vitest';
-import { parseHgetallReply, sanitizeCursor, computeMinCursor } from '../lib/polling-state';
+import {
+  parseHgetallReply,
+  sanitizeCursor,
+  computeMinCursor,
+  blockToOperationId,
+  computeCatchupLowerBound,
+} from '../lib/polling-state';
 
 // A realistic HAF id observed on 2026-07-10 (max(id) on operation_transfer_table).
 // Deliberately larger than Number.MAX_SAFE_INTEGER and NOT representable as a double.
@@ -102,5 +108,41 @@ describe('parseHgetallReply', () => {
 
   it('ignores a trailing unpaired field in a malformed flat array', () => {
     expect(parseHgetallReply(['a', '1', 'dangling'])).toEqual({ a: '1' });
+  });
+});
+
+describe('blockToOperationId', () => {
+  it('matches the id/block relationship observed on hive.operations_view', () => {
+    // Verified live 2026-07-10: op id 463926046438195218 sits in block 108016200
+    expect(BigInt('463926046438195218') >> BigInt(32)).toBe(BigInt(108016200));
+    // blockToOperationId gives the block's smallest possible op id
+    expect(blockToOperationId(108016200)).toBe(BigInt(108016200) << BigInt(32));
+    expect(blockToOperationId(108016200) <= BigInt('463926046438195218')).toBe(true);
+    expect(blockToOperationId(108016201) > BigInt('463926046438195218')).toBe(true);
+  });
+
+  it('accepts both number and bigint block numbers', () => {
+    expect(blockToOperationId(BigInt(108016200))).toBe(blockToOperationId(108016200));
+  });
+});
+
+describe('computeCatchupLowerBound', () => {
+  const HEAD = BigInt(108016230);
+
+  it('uses the min cursor when it is inside the window', () => {
+    const recentCursor = blockToOperationId(108016000) + BigInt(500);
+    expect(computeCatchupLowerBound(HEAD, recentCursor)).toBe(recentCursor);
+  });
+
+  it('caps at the window start when the cursor is older (or zero)', () => {
+    const windowStart = blockToOperationId(HEAD - BigInt(10000));
+    expect(computeCatchupLowerBound(HEAD, BigInt(0))).toBe(windowStart);
+    const ancientCursor = blockToOperationId(100000000);
+    expect(computeCatchupLowerBound(HEAD, ancientCursor)).toBe(windowStart);
+  });
+
+  it('respects a custom window size', () => {
+    const windowStart = blockToOperationId(HEAD - BigInt(100));
+    expect(computeCatchupLowerBound(HEAD, BigInt(0), 100)).toBe(windowStart);
   });
 });

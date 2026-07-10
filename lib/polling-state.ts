@@ -71,3 +71,29 @@ export function computeMinCursor(cursors: bigint[]): bigint {
   }
   return min === null ? BigInt(0) : min;
 }
+
+/**
+ * HAF operation ids encode the block number in the high 32 bits
+ * (verified against hive.operations_view: id >> 32 === block_num).
+ * This converts a block number to the smallest possible operation id
+ * of that block, usable as an id-range bound that hits the primary key
+ * index — filtering on the view's block_num column does not.
+ */
+export function blockToOperationId(blockNum: bigint | number): bigint {
+  return BigInt(blockNum) << BigInt(32);
+}
+
+/**
+ * Lower bound for the Hive-Engine catch-up query: the min cursor, but never
+ * further back than `windowBlocks` behind the head block. Bounds the scan
+ * when cursors are missing ('0') without ever excluding ids a real cursor
+ * has already passed.
+ */
+export function computeCatchupLowerBound(
+  headBlock: bigint,
+  minCursor: bigint,
+  windowBlocks: number = 10000
+): bigint {
+  const windowStart = blockToOperationId(headBlock - BigInt(windowBlocks));
+  return minCursor > windowStart ? minCursor : windowStart;
+}

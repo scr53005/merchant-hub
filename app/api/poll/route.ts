@@ -7,6 +7,11 @@ import { updatePollingState, refreshPollerLockV2, getPollingState, getPollerFrom
 import { pollAllTransfers } from '@/lib/haf-polling';
 import { handleCorsPreflight, corsResponse } from '@/lib/cors';
 
+// Worst-case degraded poll (HAFSQL queuing at ~40-50s/statement, 60s query
+// timeout): HBD + one Hive-Engine attempt ≈ 4 statements ≈ 240s. Requires
+// Fluid Compute (Vercel default); if the build rejects this, lower to 60.
+export const maxDuration = 300;
+
 // Handle CORS preflight
 export async function OPTIONS(request: Request) {
   return handleCorsPreflight(request);

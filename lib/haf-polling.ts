@@ -5,11 +5,13 @@ import { Pool } from 'pg';
 import { Transfer, RestaurantConfig, Currency } from '@/types';
 import { getAllAccounts } from './config';
 import { getPollingState, updatePollingState, getLastIdFromState, buildLastIdUpdate, publishTransfer } from './redis';
-import { computeMinCursor } from './polling-state';
+import { computeMinCursor, computeCatchupLowerBound } from './polling-state';
 
 const hafPool = new Pool({
   connectionString: process.env.HAF_CONNECTION_STRING,
-  query_timeout: 30000,
+  // 60s: rides out provider degradation like 2026-07 (~40-50s/statement
+  // PgBouncer queuing). Must stay well under the routes' maxDuration.
+  query_timeout: 60000,
 });
 
 /**
@@ -22,6 +24,7 @@ const hafPool = new Pool({
  */
 export async function pollAllTransfers(): Promise<Transfer[]> {
   const allTransfers: Transfer[] = [];
+  const pollErrors: string[] = [];
 
   try {
     // Get ALL polling state in one operation (heartbeat, mode, all lastIds)
@@ -50,21 +53,45 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
     // Collect all lastId updates to batch at the end
     const lastIdUpdates: Record<string, string> = {};
 
+    // Each currency is polled in isolation: a failure on one path (e.g. the
+    // 2026-07 HAFSQL permission regression on the Hive-Engine views) must not
+    // abort the others — before this isolation, an EURO failure discarded
+    // already-fetched HBD transfers before they were ever published.
+
     // Poll HBD - ONE query for all accounts
-    const hbdTransfers = await pollHBDBatched(accountList, accountToContext, pollingState, lastIdUpdates);
-    allTransfers.push(...hbdTransfers);
+    try {
+      const hbdTransfers = await pollHBDBatched(accountList, accountToContext, pollingState, lastIdUpdates);
+      allTransfers.push(...hbdTransfers);
+    } catch (error: any) {
+      console.error('[POLLING] HBD polling failed:', error.message);
+      pollErrors.push(`HBD: ${error.message}`);
+    }
 
-    // Poll EURO - ONE query for all accounts
-    const euroTransfers = await pollHiveEngineTokenBatched('EURO', accountList, accountToContext, pollingState, lastIdUpdates);
-    allTransfers.push(...euroTransfers);
+    // Poll Hive-Engine tokens (EURO, OCLT, LEI) - ONE query per token.
+    // They share the same tables and query shape, so after one systemic
+    // failure the remaining tokens are skipped instead of burning another
+    // query timeout each.
+    for (const symbol of ['EURO', 'OCLT', 'LEI'] as const) {
+      try {
+        const tokenTransfers = await pollHiveEngineTokenBatched(symbol, accountList, accountToContext, pollingState, lastIdUpdates);
+        allTransfers.push(...tokenTransfers);
+      } catch (error: any) {
+        console.error(`[POLLING] ${symbol} polling failed:`, error.message);
+        pollErrors.push(`${symbol}: ${error.message}`);
+        break;
+      }
+    }
 
-    // Poll OCLT - ONE query for all accounts
-    const ocltTransfers = await pollHiveEngineTokenBatched('OCLT', accountList, accountToContext, pollingState, lastIdUpdates);
-    allTransfers.push(...ocltTransfers);
-
-    // Poll LEI (Zenbar's RON-pegged IOU token) - ONE query for all accounts
-    const leiTransfers = await pollHiveEngineTokenBatched('LEI', accountList, accountToContext, pollingState, lastIdUpdates);
-    allTransfers.push(...leiTransfers);
+    // Publish transfers to environment-specific Redis Streams BEFORE advancing
+    // cursors: a failure between the two then causes a re-fetch + re-publish
+    // (duplicates, deduped by CO pages) instead of a silent permanent loss
+    // (cursor advanced, transfer never published).
+    for (const transfer of allTransfers) {
+      // Look up the env for this transfer's to_account
+      const context = accountToContext.get(transfer.to_account);
+      const env = context?.env || 'prod';
+      await publishTransfer(transfer.restaurant_id, env, transfer);
+    }
 
     // Update all lastIds in one operation
     // Redis cost: 1 HMSET (updates all changed lastIds at once)
@@ -73,24 +100,20 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
       console.log(`[POLLING] Updated ${Object.keys(lastIdUpdates).length} lastId values in single hash`);
     }
 
-    // Publish transfers to environment-specific Redis Streams
-    for (const transfer of allTransfers) {
-      // Look up the env for this transfer's to_account
-      const context = accountToContext.get(transfer.to_account);
-      const env = context?.env || 'prod';
-      await publishTransfer(transfer.restaurant_id, env, transfer);
-    }
-
     console.log(`[POLLING] Total transfers found: ${allTransfers.length}`);
 
   } catch (error: any) {
     console.error('[POLLING] Error in batched polling:', error.message);
-    // Surface the failure in /api/status — a HAFSQL outage is otherwise
-    // invisible (polls "succeed" with zero transfers). Not cleared on
-    // success to avoid an extra Redis write per poll; the timestamp tells
-    // the reader whether the error is current.
+    pollErrors.push(error.message);
+  }
+
+  // Surface failures in /api/status — a HAFSQL outage is otherwise invisible
+  // (polls "succeed" with zero transfers). Not cleared on success to avoid an
+  // extra Redis write per poll; the timestamp tells the reader whether the
+  // error is current.
+  if (pollErrors.length > 0) {
     try {
-      await updatePollingState({ lastPollError: `${new Date().toISOString()} ${error.message}` });
+      await updatePollingState({ lastPollError: `${new Date().toISOString()} ${pollErrors.join(' | ')}` });
     } catch {
       // Redis itself unreachable — nothing more we can do here
     }
@@ -234,29 +257,42 @@ async function pollHiveEngineTokenBatched(
   const client = await hafPool.connect();
 
   try {
-    await client.query('SET statement_timeout = 30000');
-    await client.query("SET timezone = 'UTC'");
+    // Single round trip for both SETs: under provider queuing EVERY statement
+    // costs the full queue latency, so each merged statement saves ~40s
+    await client.query("SET statement_timeout = 60000; SET timezone = 'UTC'");
 
-    // Get current block number
-    const blockQuery = await client.query(`
-      SELECT block_num
-      FROM hafsql.haf_blocks
-      ORDER BY block_num DESC
-      LIMIT 1
-    `);
-    const currentBlock = blockQuery.rows[0]?.block_num || 101140000;
-    const startBlock = currentBlock - 10000; // Search last ~10k blocks (≈8 hours)
+    // Head block from hafd.blocks — a fast PK scan, and still granted to
+    // hafsql_public (the old hafsql.haf_blocks view lost its grant in the
+    // provider's 2026-07 server migration). Irreversible-only, which is fine:
+    // it only bounds the catch-up window; the ops query below has no upper
+    // bound, so the newest (reversible) operations are still included.
+    const blockQuery = await client.query(
+      `SELECT num FROM hafd.blocks ORDER BY num DESC LIMIT 1`
+    );
+    const headBlock = BigInt(blockQuery.rows[0]?.num ?? 108000000);
+    // Catch-up window: min cursor, capped at ~10k blocks back (≈8 hours) —
+    // same policy as before the rewrite
+    const lowerBound = computeCatchupLowerBound(headBlock, minLastId);
 
-    // Query custom_json operations for ALL restaurants at once
+    // Query custom_json operations for ALL restaurants at once via the
+    // standard HAF hive.operations_view — grants-proof and portable, unlike
+    // the revoked hafsql.operation_custom_json_view. op_type_id 18 =
+    // custom_json_operation. The id-range bound hits the primary key index;
+    // filtering on this view's block_num column does NOT.
     const result = await client.query(
-      `SELECT id, timestamp AT TIME ZONE 'UTC' as timestamp, required_auths, json, block_num
-       FROM hafsql.operation_custom_json_view
-       WHERE block_num BETWEEN $1 AND $2
-         AND custom_id = 'ssc-mainnet-hive'
-         AND id > $3
-       ORDER BY block_num DESC
+      `SELECT o.id,
+              b.created_at AT TIME ZONE 'UTC' AS timestamp,
+              o.body->'value'->'required_auths' AS required_auths,
+              o.body->'value'->>'json' AS json,
+              o.block_num
+       FROM hive.operations_view o
+       LEFT JOIN hive.blocks_view b ON b.num = o.block_num
+       WHERE o.op_type_id = 18
+         AND o.body->'value'->>'id' = 'ssc-mainnet-hive'
+         AND o.id > $1
+       ORDER BY o.id DESC
        LIMIT 1000`,
-      [startBlock, currentBlock, minLastId.toString()]
+      [lowerBound.toString()]
     );
 
     console.log(`[${symbol} BATCHED] Query returned ${result.rows.length} raw custom_json rows`);
@@ -342,7 +378,9 @@ async function pollHiveEngineTokenBatched(
         symbol: symbol,
         memo: memoString,
         parsed_memo: memoString,
-        received_at: new Date(row.timestamp).toISOString(),
+        // timestamp can be null if the block joined from blocks_view is not
+        // visible yet — fall back to "now" rather than new Date(null) = 1970
+        received_at: row.timestamp ? new Date(row.timestamp).toISOString() : new Date().toISOString(),
         block_num: row.block_num,
       });
     }

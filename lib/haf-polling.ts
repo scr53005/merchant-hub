@@ -5,6 +5,7 @@ import { Pool } from 'pg';
 import { Transfer, RestaurantConfig, Currency } from '@/types';
 import { getAllAccounts } from './config';
 import { getPollingState, updatePollingState, getLastIdFromState, buildLastIdUpdate, publishTransfer } from './redis';
+import { computeMinCursor } from './polling-state';
 
 const hafPool = new Pool({
   connectionString: process.env.HAF_CONNECTION_STRING,
@@ -84,6 +85,15 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
 
   } catch (error: any) {
     console.error('[POLLING] Error in batched polling:', error.message);
+    // Surface the failure in /api/status — a HAFSQL outage is otherwise
+    // invisible (polls "succeed" with zero transfers). Not cleared on
+    // success to avoid an extra Redis write per poll; the timestamp tells
+    // the reader whether the error is current.
+    try {
+      await updatePollingState({ lastPollError: `${new Date().toISOString()} ${error.message}` });
+    } catch {
+      // Redis itself unreachable — nothing more we can do here
+    }
   }
 
   return allTransfers;
@@ -104,16 +114,14 @@ async function pollHBDBatched(
 
   // Get lastId for each ACCOUNT from polling state (no Redis calls)
   const accountLastIds = new Map<string, bigint>();
-  let minLastId = BigInt(Number.MAX_SAFE_INTEGER);
-
   for (const account of allAccounts) {
     const lastIdStr = getLastIdFromState(pollingState, account, 'HBD');
-    const lastIdBigInt = BigInt(lastIdStr);
-    accountLastIds.set(account, lastIdBigInt);
-    if (lastIdBigInt < minLastId) {
-      minLastId = lastIdBigInt;
-    }
+    accountLastIds.set(account, BigInt(lastIdStr));
   }
+  // True min across cursors — never seed with a numeric "+infinity": real HAF
+  // ids exceed Number.MAX_SAFE_INTEGER, so any fixed seed wins the min-scan
+  // and leaks into the SQL as a bogus lower bound.
+  const minLastId = computeMinCursor(Array.from(accountLastIds.values()));
 
   console.log(`[HBD BATCHED] Polling ${allAccounts.length} accounts, lastIds:`, Array.from(accountLastIds.entries()).map(([acc, lastId]) => `${acc}=${lastId.toString()}`).join(', '));
 
@@ -214,16 +222,12 @@ async function pollHiveEngineTokenBatched(
 
   // Get lastId for each ACCOUNT from polling state (no Redis calls)
   const accountLastIds = new Map<string, bigint>();
-  let minLastId = BigInt(Number.MAX_SAFE_INTEGER);
-
   for (const account of allAccounts) {
     const lastIdStr = getLastIdFromState(pollingState, account, symbol);
-    const lastIdBigInt = BigInt(lastIdStr);
-    accountLastIds.set(account, lastIdBigInt);
-    if (lastIdBigInt < minLastId) {
-      minLastId = lastIdBigInt;
-    }
+    accountLastIds.set(account, BigInt(lastIdStr));
   }
+  // True min across cursors — see pollHBDBatched for why no numeric seed.
+  const minLastId = computeMinCursor(Array.from(accountLastIds.values()));
 
   console.log(`[${symbol} BATCHED] Polling ${allAccounts.length} accounts, minLastId=${minLastId.toString()}`);
 

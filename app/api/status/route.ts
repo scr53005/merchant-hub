@@ -113,6 +113,9 @@ export async function GET() {
       heartbeatTimeout: POLLING_CONFIG.HEARTBEAT_TIMEOUT,
       cronLastPoll,
       timeSinceCronPoll: cronLastPoll ? now - cronLastPoll : null,
+      // Last failed poll ("<ISO timestamp> <message>") — check the timestamp:
+      // it is NOT cleared by successful polls
+      lastPollError: pollingState.lastPollError || null,
     };
 
     // Per-restaurant info

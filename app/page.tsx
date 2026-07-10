@@ -40,6 +40,7 @@ interface StatusData {
     heartbeatTimeout: number;
     cronLastPoll: number | null;
     timeSinceCronPoll: number | null;
+    lastPollError: string | null;
   };
   restaurants: RestaurantStatus[];
   systemBroadcasts: StreamInfo;
@@ -220,6 +221,22 @@ export default function Dashboard() {
                   </p>
                 </div>
               </div>
+              {/* Last poll error — persisted on failure, NOT cleared on success.
+                  Red only while recent (likely a live HAFSQL outage); dimmed once
+                  polls have had time to succeed again. */}
+              {data.polling.lastPollError && (() => {
+                const sep = data.polling.lastPollError.indexOf(' ');
+                const ts = sep > 0 ? new Date(data.polling.lastPollError.slice(0, sep)) : new Date(NaN);
+                const valid = !isNaN(ts.getTime());
+                const message = valid ? data.polling.lastPollError.slice(sep + 1) : data.polling.lastPollError;
+                const ageMs = Date.now() - ts.getTime();
+                const recent = valid && ageMs < 10 * 60_000;
+                return (
+                  <p className={`mt-4 text-xs font-mono ${recent ? 'text-red-400' : 'text-zinc-500'}`}>
+                    Last poll error{valid ? ` (${formatMs(ageMs)} ago)` : ''}: {message}
+                  </p>
+                );
+              })()}
             </section>
 
             {/* Restaurants */}

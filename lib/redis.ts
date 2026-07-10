@@ -1,6 +1,7 @@
 // Upstash Redis client for merchant-hub
 
 import { Redis } from '@upstash/redis';
+import { parseHgetallReply, sanitizeCursor } from './polling-state';
 
 if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) {
   throw new Error('Missing Upstash Redis environment variables: KV_REST_API_URL and KV_REST_API_TOKEN');
@@ -115,6 +116,7 @@ export interface PollingState {
   cronLastPoll?: string; // Last cron fallback poll (kept separate from heartbeat on purpose)
   poller?: string;
   mode?: 'active-6s' | 'sleeping-1min';
+  lastPollError?: string; // "<ISO timestamp> <message>" of the last failed poll (not cleared on success)
   // Dynamic lastId fields: "{account}:{currency}" -> id
   // e.g., "indies.cafe:HBD" -> "12345"
   [key: string]: string | undefined;
@@ -126,8 +128,14 @@ export interface PollingState {
  * Redis cost: 1 HGETALL
  */
 export async function getPollingState(): Promise<PollingState> {
-  const state = await redis.hgetall<Record<string, string>>(POLLING_STATE_KEY);
-  return state || {};
+  // Read via the raw REST path, NOT redis.hgetall: the SDK's automatic
+  // deserialization JSON.parses each value, so a big numeric-string cursor
+  // ("463839730480448002") comes back as a JS number rounded to the nearest
+  // representable double (off by up to ~64 at that magnitude). A cursor
+  // rounded UP overshoots the true last-processed id and silently skips
+  // transfers. Raw HGETALL returns verbatim strings.
+  const reply = await execRaw<unknown>(['HGETALL', POLLING_STATE_KEY]);
+  return parseHgetallReply(reply);
 }
 
 /**
@@ -184,7 +192,9 @@ export function getModeFromState(state: PollingState): 'active-6s' | 'sleeping-1
  */
 export function getLastIdFromState(state: PollingState, account: string, currency: string): string {
   const key = `${account}:${currency}`;
-  return state[key] || '0';
+  // Defense in depth: even if a non-string or garbage value lands in the
+  // hash, never let it reach BigInt()/SQL — warn and fall back to '0'.
+  return sanitizeCursor(state[key]);
 }
 
 /**

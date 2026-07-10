@@ -1,0 +1,73 @@
+// Pure helpers for polling-state cursor handling.
+// No Redis client in this module so tests can import it without env vars.
+//
+// HAF operation ids are 64-bit integers (currently ~4.6e17), far beyond
+// Number.MAX_SAFE_INTEGER (2^53 - 1 ≈ 9.0e15). They must circulate as strings
+// end-to-end and only ever be compared as BigInt: a single pass through a JS
+// number rounds the id to the nearest representable double (spacing ~64 at
+// current magnitudes) and silently corrupts the cursor.
+
+// Plausibility ceiling for cursors: ~20x above current HAF ids but still below
+// 2^63 - 1, so corrupted values get caught while legitimate growth never trips it.
+const CURSOR_CEILING = BigInt('10000000000000000000'); // 10^19
+
+/**
+ * Normalize an HGETALL reply into a Record<string, string> with verbatim
+ * string values. The Upstash REST API returns a flat [field, value, ...]
+ * array; some Upstash surfaces return an object instead — handle both.
+ */
+export function parseHgetallReply(reply: unknown): Record<string, string> {
+  const state: Record<string, string> = {};
+  if (Array.isArray(reply)) {
+    for (let i = 0; i + 1 < reply.length; i += 2) {
+      state[String(reply[i])] = String(reply[i + 1]);
+    }
+  } else if (reply && typeof reply === 'object') {
+    for (const [key, value] of Object.entries(reply)) {
+      if (value !== null && value !== undefined) {
+        state[key] = String(value);
+      }
+    }
+  }
+  return state;
+}
+
+/**
+ * Coerce and validate a cursor value read from Redis.
+ * Returns a canonical decimal-string cursor, or '0' when the value is missing
+ * or garbage. '0' is the safe fallback direction: it can only cause re-fetches
+ * of already-processed transfers, which CO pages dedupe by transfer id.
+ */
+export function sanitizeCursor(value: unknown): string {
+  if (value === null || value === undefined) return '0';
+  const str = String(value);
+  if (!/^\d+$/.test(str)) {
+    console.warn(`[CURSOR] Invalid cursor value ${JSON.stringify(str)} — falling back to '0'`);
+    return '0';
+  }
+  const asBigInt = BigInt(str);
+  if (asBigInt > CURSOR_CEILING) {
+    console.warn(`[CURSOR] Implausibly large cursor ${str} (> 10^19) — falling back to '0'`);
+    return '0';
+  }
+  // Canonical form (strips leading zeros)
+  return asBigInt.toString();
+}
+
+/**
+ * True minimum of a set of cursors.
+ * Never seed the scan with a numeric "+infinity": real HAF ids exceed
+ * Number.MAX_SAFE_INTEGER, so any fixed numeric seed eventually loses every
+ * comparison and leaks into the SQL as a bogus lower bound (the 2026-07
+ * `id > 9007199254740991` bug). Empty input returns 0, meaning "no lower
+ * bound" — the query fetches newest rows and per-account filters take over.
+ */
+export function computeMinCursor(cursors: bigint[]): bigint {
+  let min: bigint | null = null;
+  for (const cursor of cursors) {
+    if (min === null || cursor < min) {
+      min = cursor;
+    }
+  }
+  return min === null ? BigInt(0) : min;
+}

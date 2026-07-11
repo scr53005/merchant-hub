@@ -1,18 +1,21 @@
-// HAF (Hive Application Framework) polling logic for merchant-hub
-// Polls hafsql_public database for transfers to registered restaurants
+// Transfer-polling orchestrator for merchant-hub.
+//
+// Phase 1 of HIVESQL-HA-PLAN.md: all source-specific work (SQL, connections,
+// row normalization, catch-up policy) lives behind the PollingSource adapter
+// (lib/sources/); this module owns only the source-INDEPENDENT pipeline:
+// cursor bookkeeping, memo filtering, Transfer mapping, publish ordering,
+// and Redis state writes. Phase 3 replaces the hardcoded source below with
+// the failover source manager.
 
-import { Pool } from 'pg';
-import { Transfer, RestaurantConfig, Currency } from '@/types';
+import { Transfer, RestaurantConfig } from '@/types';
 import { getAllAccounts } from './config';
 import { getPollingState, updatePollingState, getLastIdFromState, buildLastIdUpdate, publishTransfer } from './redis';
-import { computeMinCursor, computeCatchupLowerBound, computeSyncLagBlocks } from './polling-state';
+import { computeMinCursor } from './polling-state';
+import { PollingSource } from './sources/types';
+import { hafsqlSource } from './sources/hafsql';
 
-const hafPool = new Pool({
-  connectionString: process.env.HAF_CONNECTION_STRING,
-  // 60s: rides out provider degradation like 2026-07 (~40-50s/statement
-  // PgBouncer queuing). Must stay well under the routes' maxDuration.
-  query_timeout: 60000,
-});
+// Phase 3 replaces this with the source manager's choice
+const activeSource: PollingSource = hafsqlSource;
 
 // Sync-lag check throttle: one extra statement per minute, not per 6s poll —
 // bounds both the SQL cost during provider degradation (a statement can take
@@ -20,12 +23,12 @@ const hafPool = new Pool({
 const SYNC_LAG_CHECK_INTERVAL_MS = 60_000;
 
 /**
- * Main polling function - polls HAF for all restaurants and all currencies
- * Uses batched queries (ONE query per currency for ALL restaurants)
- * Queries BOTH prod and dev accounts simultaneously (O(1) scaling makes this negligible)
- * Returns array of detected transfers
+ * Main polling function - polls the active source for all restaurants and
+ * all currencies. Uses batched queries (ONE query per currency for ALL
+ * restaurants), both prod and dev accounts simultaneously.
+ * Returns array of detected transfers.
  *
- * NEW (Option 3): Uses single hash for all state (1 HGETALL + 1 HMSET)
+ * Redis budget: 1 HGETALL + 1 HMSET (all cursor updates batched).
  */
 export async function pollAllTransfers(): Promise<Transfer[]> {
   const allTransfers: Transfer[] = [];
@@ -65,7 +68,7 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
 
     // Poll HBD - ONE query for all accounts
     try {
-      const hbdTransfers = await pollHBDBatched(accountList, accountToContext, pollingState, lastIdUpdates);
+      const hbdTransfers = await pollHBDBatched(activeSource, accountList, accountToContext, pollingState, lastIdUpdates);
       allTransfers.push(...hbdTransfers);
     } catch (error: any) {
       console.error('[POLLING] HBD polling failed:', error.message);
@@ -78,7 +81,7 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
     // query timeout each.
     for (const symbol of ['EURO', 'OCLT', 'LEI'] as const) {
       try {
-        const tokenTransfers = await pollHiveEngineTokenBatched(symbol, accountList, accountToContext, pollingState, lastIdUpdates);
+        const tokenTransfers = await pollHiveEngineTokenBatched(activeSource, symbol, accountList, accountToContext, pollingState, lastIdUpdates);
         allTransfers.push(...tokenTransfers);
       } catch (error: any) {
         console.error(`[POLLING] ${symbol} polling failed:`, error.message);
@@ -87,11 +90,10 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
       }
     }
 
-    // Sync-lag check (throttled): the HBD source is a derived table filled by
-    // a separate HAFSQL indexer — it can freeze while queries keep succeeding
+    // Sync-lag check (throttled): the HBD source can be a derived table filled
+    // by a separate indexer — it can freeze while queries keep succeeding
     // with zero new rows (2026-07-10 backup server: ~19h behind, zero errors).
-    // Compare its newest row's block (id >> 32) against the raw HAF head block
-    // and surface the lag in /api/status + dashboard. Skipped when this poll
+    // Surface the lag in /api/status + dashboard. Skipped when this poll
     // already failed: no point burning another query timeout on a down provider.
     if (pollErrors.length === 0) {
       try {
@@ -99,20 +101,16 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
           ? Date.parse(String(pollingState.hbdSourceLagCheckedAt))
           : NaN;
         if (isNaN(lastChecked) || Date.now() - lastChecked > SYNC_LAG_CHECK_INTERVAL_MS) {
-          // Single statement for both values so they come from the same snapshot
-          const lagResult = await hafPool.query(
-            `SELECT (SELECT num FROM hafd.blocks ORDER BY num DESC LIMIT 1) AS head_block,
-                    (SELECT id FROM hafsql.operation_transfer_table ORDER BY id DESC LIMIT 1) AS max_transfer_id`
-          );
-          const row = lagResult.rows[0];
-          if (row?.head_block != null && row?.max_transfer_id != null) {
-            const lagBlocks = computeSyncLagBlocks(BigInt(row.head_block), BigInt(row.max_transfer_id));
+          const health = await activeSource.healthCheck();
+          if (health.reachable && health.hbdLagBlocks != null) {
             // Piggybacks on the lastIds HMSET below (same Redis write)
-            lastIdUpdates['hbdSourceLagBlocks'] = lagBlocks.toString();
+            lastIdUpdates['hbdSourceLagBlocks'] = health.hbdLagBlocks;
             lastIdUpdates['hbdSourceLagCheckedAt'] = new Date().toISOString();
-            if (lagBlocks > BigInt(100)) {
-              console.warn(`[POLLING] HBD source lag: ${lagBlocks.toString()} blocks behind head — operation_transfer_table indexer may be frozen`);
+            if (BigInt(health.hbdLagBlocks) > BigInt(100)) {
+              console.warn(`[POLLING] HBD source lag: ${health.hbdLagBlocks} blocks behind head — ${activeSource.name} transfer indexer may be frozen`);
             }
+          } else if (!health.reachable) {
+            console.error('[POLLING] Sync-lag check failed:', health.error);
           }
         }
       } catch (error: any) {
@@ -146,7 +144,7 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
     pollErrors.push(error.message);
   }
 
-  // Surface failures in /api/status — a HAFSQL outage is otherwise invisible
+  // Surface failures in /api/status — a source outage is otherwise invisible
   // (polls "succeed" with zero transfers). Not cleared on success to avoid an
   // extra Redis write per poll; the timestamp tells the reader whether the
   // error is current.
@@ -162,11 +160,12 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
 }
 
 /**
- * Poll HBD transfers for ALL restaurants in a single batched query
- * Uses SQL IN operator to query all accounts at once
- * NEW: Uses polling state object instead of individual Redis calls
+ * Poll HBD transfers for ALL restaurants in a single batched source query.
+ * Cursor bookkeeping and memo filtering are source-independent; the adapter
+ * returns normalized rows newest-first.
  */
 async function pollHBDBatched(
+  source: PollingSource,
   allAccounts: string[],
   accountToContext: Map<string, { restaurant: RestaurantConfig; env: 'prod' | 'dev' }>,
   pollingState: any,
@@ -174,7 +173,7 @@ async function pollHBDBatched(
 ): Promise<Transfer[]> {
   if (allAccounts.length === 0) return [];
 
-  // Get lastId for each ACCOUNT from polling state (no Redis calls)
+  // Get cursor for each ACCOUNT from polling state (no Redis calls)
   const accountLastIds = new Map<string, bigint>();
   for (const account of allAccounts) {
     const lastIdStr = getLastIdFromState(pollingState, account, 'HBD');
@@ -185,48 +184,34 @@ async function pollHBDBatched(
   // and leaks into the SQL as a bogus lower bound.
   const minLastId = computeMinCursor(Array.from(accountLastIds.values()));
 
-  console.log(`[HBD BATCHED] Polling ${allAccounts.length} accounts, lastIds:`, Array.from(accountLastIds.entries()).map(([acc, lastId]) => `${acc}=${lastId.toString()}`).join(', '));
+  console.log(`[HBD BATCHED] Polling ${allAccounts.length} accounts via ${source.name}, lastIds:`, Array.from(accountLastIds.entries()).map(([acc, lastId]) => `${acc}=${lastId.toString()}`).join(', '));
 
-  // Query all accounts at once using ANY operator
-  const accountsArrayLiteral = `ARRAY['${allAccounts.join("','")}']`;
-  const sqlStatement = `SELECT id, to_account, from_account, amount, symbol, memo FROM hafsql.operation_transfer_table WHERE to_account = ANY(${accountsArrayLiteral}) AND symbol = 'HBD' AND id > ${minLastId.toString()} ORDER BY id DESC LIMIT 100`;
-  console.warn(`[HBD BATCHED] EXACT SQL: ${sqlStatement}`);
+  const rows = await source.fetchHbdRows(allAccounts, minLastId);
 
-  const result = await hafPool.query(
-    `SELECT id, to_account, from_account, amount, symbol, memo
-     FROM hafsql.operation_transfer_table
-     WHERE to_account = ANY($1)
-       AND symbol = 'HBD'
-       AND id > $2
-     ORDER BY id DESC
-     LIMIT 100`,
-    [allAccounts, minLastId.toString()]
-  );
-
-  console.log(`[HBD BATCHED] Query returned ${result.rows.length} raw rows`);
-  if (result.rows.length > 0) {
-    console.log(`[HBD BATCHED] Raw rows:`, result.rows.map(r => `id=${r.id} to=${r.to_account} from=${r.from_account} memo="${r.memo.substring(0, 50)}..."`).join(' | '));
+  console.log(`[HBD BATCHED] Query returned ${rows.length} raw rows`);
+  if (rows.length > 0) {
+    console.log(`[HBD BATCHED] Raw rows:`, rows.map(r => `id=${r.transferId} to=${r.to_account} from=${r.from_account} memo="${r.memo.substring(0, 50)}..."`).join(' | '));
   }
 
   const allTransfers: Transfer[] = [];
   const accountMaxIds = new Map<string, bigint>();
 
-  for (const row of result.rows) {
+  for (const row of rows) {
     const account = row.to_account;
     const context = accountToContext.get(account);
 
     if (!context) {
-      console.warn(`[HBD BATCHED] REJECTED - Unknown account: ${account} (transfer ID: ${row.id})`);
+      console.warn(`[HBD BATCHED] REJECTED - Unknown account: ${account} (transfer ID: ${row.transferId})`);
       continue;
     }
 
     const { restaurant } = context;
-    const rowId = BigInt(row.id);
+    const rowCursor = BigInt(row.cursor);
     const accountLastId = accountLastIds.get(account) || BigInt(0);
 
-    // Filter: only include if id > account's lastId
-    if (rowId <= accountLastId) {
-      console.warn(`[HBD BATCHED] REJECTED - Already processed: ${account} transfer ID ${row.id} (lastId=${accountLastId.toString()})`);
+    // Filter: only include if cursor > account's cursor
+    if (rowCursor <= accountLastId) {
+      console.warn(`[HBD BATCHED] REJECTED - Already processed: ${account} transfer ID ${row.transferId} (lastId=${accountLastId.toString()})`);
       continue;
     }
 
@@ -234,30 +219,30 @@ async function pollHBDBatched(
     const memoFilter = restaurant.memoFilters.HBD || '%TABLE %';
     const memoPattern = memoFilter.replace(/%/g, '');
     if (!row.memo.includes(memoPattern)) {
-      console.warn(`[HBD BATCHED] REJECTED - Memo mismatch for ${account}: pattern="${memoPattern}" memo="${row.memo}" (transfer ID: ${row.id})`);
+      console.warn(`[HBD BATCHED] REJECTED - Memo mismatch for ${account}: pattern="${memoPattern}" memo="${row.memo}" (transfer ID: ${row.transferId})`);
       continue;
     }
 
-    // Track max ID for this account
+    // Track max cursor for this account
     const currentMax = accountMaxIds.get(account) || BigInt(0);
-    if (rowId > currentMax) {
-      accountMaxIds.set(account, rowId);
+    if (rowCursor > currentMax) {
+      accountMaxIds.set(account, rowCursor);
     }
 
     allTransfers.push({
-      id: row.id.toString(),
+      id: row.transferId,
       restaurant_id: restaurant.id,
       to_account: account, // The recipient's Hive account (matches HAFSQL column name)
       from_account: row.from_account,
-      amount: row.amount.toString(),
+      amount: row.amount,
       symbol: 'HBD',
       memo: row.memo,
       parsed_memo: row.memo,
-      received_at: new Date().toISOString(),
+      received_at: row.received_at,
     });
   }
 
-  // Build lastId updates for each account that received transfers
+  // Build cursor updates for each account that received transfers
   // These will be batched together in pollAllTransfers
   for (const [account, maxId] of accountMaxIds) {
     Object.assign(lastIdUpdates, buildLastIdUpdate(account, 'HBD', maxId.toString()));
@@ -269,11 +254,12 @@ async function pollHBDBatched(
 }
 
 /**
- * Poll Hive-Engine tokens (EURO, OCLT) for ALL restaurants in a single batched query
- * Uses block range and filters in application code for each restaurant
- * NEW: Uses polling state object instead of individual Redis calls
+ * Poll Hive-Engine tokens (EURO, OCLT, LEI) for ALL restaurants in a single
+ * batched source query. The adapter returns raw custom_json ops; symbol,
+ * recipient and memo filtering happen here in application code.
  */
 async function pollHiveEngineTokenBatched(
+  source: PollingSource,
   symbol: 'EURO' | 'OCLT' | 'LEI',
   allAccounts: string[],
   accountToContext: Map<string, { restaurant: RestaurantConfig; env: 'prod' | 'dev' }>,
@@ -282,7 +268,7 @@ async function pollHiveEngineTokenBatched(
 ): Promise<Transfer[]> {
   if (allAccounts.length === 0) return [];
 
-  // Get lastId for each ACCOUNT from polling state (no Redis calls)
+  // Get cursor for each ACCOUNT from polling state (no Redis calls)
   const accountLastIds = new Map<string, bigint>();
   for (const account of allAccounts) {
     const lastIdStr = getLastIdFromState(pollingState, account, symbol);
@@ -291,149 +277,105 @@ async function pollHiveEngineTokenBatched(
   // True min across cursors — see pollHBDBatched for why no numeric seed.
   const minLastId = computeMinCursor(Array.from(accountLastIds.values()));
 
-  console.log(`[${symbol} BATCHED] Polling ${allAccounts.length} accounts, minLastId=${minLastId.toString()}`);
+  console.log(`[${symbol} BATCHED] Polling ${allAccounts.length} accounts via ${source.name}, minLastId=${minLastId.toString()}`);
 
-  const client = await hafPool.connect();
+  const rows = await source.fetchHiveEngineOps(minLastId);
 
-  try {
-    // Single round trip for both SETs: under provider queuing EVERY statement
-    // costs the full queue latency, so each merged statement saves ~40s
-    await client.query("SET statement_timeout = 60000; SET timezone = 'UTC'");
+  console.log(`[${symbol} BATCHED] Query returned ${rows.length} raw custom_json rows`);
 
-    // Head block from hafd.blocks — a fast PK scan, and still granted to
-    // hafsql_public (the old hafsql.haf_blocks view lost its grant in the
-    // provider's 2026-07 server migration). Irreversible-only, which is fine:
-    // it only bounds the catch-up window; the ops query below has no upper
-    // bound, so the newest (reversible) operations are still included.
-    const blockQuery = await client.query(
-      `SELECT num FROM hafd.blocks ORDER BY num DESC LIMIT 1`
-    );
-    const headBlock = BigInt(blockQuery.rows[0]?.num ?? 108000000);
-    // Catch-up window: min cursor, capped at ~10k blocks back (≈8 hours) —
-    // same policy as before the rewrite
-    const lowerBound = computeCatchupLowerBound(headBlock, minLastId);
-
-    // Query custom_json operations for ALL restaurants at once via the
-    // standard HAF hive.operations_view — grants-proof and portable, unlike
-    // the revoked hafsql.operation_custom_json_view. op_type_id 18 =
-    // custom_json_operation. The id-range bound hits the primary key index;
-    // filtering on this view's block_num column does NOT.
-    const result = await client.query(
-      `SELECT o.id,
-              b.created_at AT TIME ZONE 'UTC' AS timestamp,
-              o.body->'value'->'required_auths' AS required_auths,
-              o.body->'value'->>'json' AS json,
-              o.block_num
-       FROM hive.operations_view o
-       LEFT JOIN hive.blocks_view b ON b.num = o.block_num
-       WHERE o.op_type_id = 18
-         AND o.body->'value'->>'id' = 'ssc-mainnet-hive'
-         AND o.id > $1
-       ORDER BY o.id DESC
-       LIMIT 1000`,
-      [lowerBound.toString()]
-    );
-
-    console.log(`[${symbol} BATCHED] Query returned ${result.rows.length} raw custom_json rows`);
-
-    if (result.rows.length === 0) {
-      return [];
-    }
-
-    const allTransfers: Transfer[] = [];
-    const accountMaxIds = new Map<string, bigint>();
-
-    for (const row of result.rows) {
-      // Parse JSON
-      let jsonData: any;
-      try {
-        jsonData = typeof row.json === 'string' ? JSON.parse(row.json) : row.json;
-      } catch (e) {
-        console.error(`[${symbol} BATCHED] Error parsing JSON:`, e);
-        continue;
-      }
-
-      // Filter: only token transfers with matching symbol
-      if (
-        jsonData.contractName !== 'tokens' ||
-        jsonData.contractAction !== 'transfer' ||
-        jsonData.contractPayload?.symbol !== symbol
-      ) {
-        continue;
-      }
-
-      const toAccount = jsonData.contractPayload?.to;
-      if (!toAccount || !accountToContext.has(toAccount)) {
-        continue; // Not for any of our restaurants
-      }
-
-      const context = accountToContext.get(toAccount)!;
-      const { restaurant } = context;
-      const rowId = BigInt(row.id);
-      const accountLastId = accountLastIds.get(toAccount) || BigInt(0);
-
-      // Filter: only include if id > account's lastId
-      if (rowId <= accountLastId) {
-        continue;
-      }
-
-      // Extract and check memo
-      const memoRaw = jsonData.contractPayload?.memo;
-      const memoString = typeof memoRaw === 'string' ? memoRaw : (memoRaw ? JSON.stringify(memoRaw) : '');
-      const memoFilter = restaurant.memoFilters[symbol] || '%TABLE %';
-      const memoPattern = memoFilter.replace(/%/g, '');
-
-      if (!memoString.includes(memoPattern)) {
-        continue; // Memo doesn't match restaurant's filter
-      }
-
-      // Parse from_account from required_auths
-      let fromAccount = 'unknown';
-      try {
-        const authsArray = typeof row.required_auths === 'string'
-          ? JSON.parse(row.required_auths)
-          : row.required_auths;
-        if (authsArray && authsArray.length > 0) {
-          fromAccount = authsArray[0];
-        }
-      } catch (e) {
-        console.error(`[${symbol} BATCHED] Error parsing required_auths:`, e);
-      }
-
-      const quantity = jsonData.contractPayload?.quantity || '0';
-
-      // Track max ID for this account
-      const currentMax = accountMaxIds.get(toAccount) || BigInt(0);
-      if (rowId > currentMax) {
-        accountMaxIds.set(toAccount, rowId);
-      }
-
-      allTransfers.push({
-        id: row.id.toString(),
-        restaurant_id: restaurant.id,
-        to_account: toAccount, // The recipient's Hive account (matches HAFSQL column name)
-        from_account: fromAccount,
-        amount: quantity,
-        symbol: symbol,
-        memo: memoString,
-        parsed_memo: memoString,
-        // timestamp can be null if the block joined from blocks_view is not
-        // visible yet — fall back to "now" rather than new Date(null) = 1970
-        received_at: row.timestamp ? new Date(row.timestamp).toISOString() : new Date().toISOString(),
-        block_num: row.block_num,
-      });
-    }
-
-    // Build lastId updates for each account that received transfers
-    // These will be batched together in pollAllTransfers
-    for (const [account, maxId] of accountMaxIds) {
-      Object.assign(lastIdUpdates, buildLastIdUpdate(account, symbol, maxId.toString()));
-      console.log(`[${symbol} BATCHED] Queued lastId update to ${maxId.toString()} for ${account}`);
-    }
-
-    console.log(`[${symbol} BATCHED] Found ${allTransfers.length} transfers across ${accountMaxIds.size} accounts`);
-    return allTransfers;
-  } finally {
-    client.release();
+  if (rows.length === 0) {
+    return [];
   }
+
+  const allTransfers: Transfer[] = [];
+  const accountMaxIds = new Map<string, bigint>();
+
+  for (const row of rows) {
+    // Parse JSON
+    let jsonData: any;
+    try {
+      jsonData = typeof row.json === 'string' ? JSON.parse(row.json) : row.json;
+    } catch (e) {
+      console.error(`[${symbol} BATCHED] Error parsing JSON:`, e);
+      continue;
+    }
+
+    // Filter: only token transfers with matching symbol
+    if (
+      jsonData.contractName !== 'tokens' ||
+      jsonData.contractAction !== 'transfer' ||
+      jsonData.contractPayload?.symbol !== symbol
+    ) {
+      continue;
+    }
+
+    const toAccount = jsonData.contractPayload?.to;
+    if (!toAccount || !accountToContext.has(toAccount)) {
+      continue; // Not for any of our restaurants
+    }
+
+    const context = accountToContext.get(toAccount)!;
+    const { restaurant } = context;
+    const rowCursor = BigInt(row.cursor);
+    const accountLastId = accountLastIds.get(toAccount) || BigInt(0);
+
+    // Filter: only include if cursor > account's cursor
+    if (rowCursor <= accountLastId) {
+      continue;
+    }
+
+    // Extract and check memo
+    const memoRaw = jsonData.contractPayload?.memo;
+    const memoString = typeof memoRaw === 'string' ? memoRaw : (memoRaw ? JSON.stringify(memoRaw) : '');
+    const memoFilter = restaurant.memoFilters[symbol] || '%TABLE %';
+    const memoPattern = memoFilter.replace(/%/g, '');
+
+    if (!memoString.includes(memoPattern)) {
+      continue; // Memo doesn't match restaurant's filter
+    }
+
+    // Parse from_account from required_auths
+    let fromAccount = 'unknown';
+    try {
+      const authsArray = typeof row.required_auths === 'string'
+        ? JSON.parse(row.required_auths)
+        : row.required_auths;
+      if (Array.isArray(authsArray) && authsArray.length > 0) {
+        fromAccount = authsArray[0];
+      }
+    } catch (e) {
+      console.error(`[${symbol} BATCHED] Error parsing required_auths:`, e);
+    }
+
+    const quantity = jsonData.contractPayload?.quantity || '0';
+
+    // Track max cursor for this account
+    const currentMax = accountMaxIds.get(toAccount) || BigInt(0);
+    if (rowCursor > currentMax) {
+      accountMaxIds.set(toAccount, rowCursor);
+    }
+
+    allTransfers.push({
+      id: row.transferId,
+      restaurant_id: restaurant.id,
+      to_account: toAccount, // The recipient's Hive account (matches HAFSQL column name)
+      from_account: fromAccount,
+      amount: quantity,
+      symbol: symbol,
+      memo: memoString,
+      parsed_memo: memoString,
+      received_at: row.received_at,
+      block_num: row.block_num,
+    });
+  }
+
+  // Build cursor updates for each account that received transfers
+  // These will be batched together in pollAllTransfers
+  for (const [account, maxId] of accountMaxIds) {
+    Object.assign(lastIdUpdates, buildLastIdUpdate(account, symbol, maxId.toString()));
+    console.log(`[${symbol} BATCHED] Queued lastId update to ${maxId.toString()} for ${account}`);
+  }
+
+  console.log(`[${symbol} BATCHED] Found ${allTransfers.length} transfers across ${accountMaxIds.size} accounts`);
+  return allTransfers;
 }

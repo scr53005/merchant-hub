@@ -41,6 +41,8 @@ interface StatusData {
     cronLastPoll: number | null;
     timeSinceCronPoll: number | null;
     lastPollError: string | null;
+    hbdSourceLagBlocks: number | null;
+    hbdSourceLagCheckedAt: string | null;
   };
   restaurants: RestaurantStatus[];
   systemBroadcasts: StreamInfo;
@@ -234,6 +236,25 @@ export default function Dashboard() {
                 return (
                   <p className={`mt-4 text-xs font-mono ${recent ? 'text-red-400' : 'text-zinc-500'}`}>
                     Last poll error{valid ? ` (${formatMs(ageMs)} ago)` : ''}: {message}
+                  </p>
+                );
+              })()}
+              {/* HBD source lag — hafsql.operation_transfer_table vs raw HAF
+                  head. The table is filled by a separate indexer that can
+                  freeze while polls succeed with zero rows (2026-07 backup
+                  server: ~19h behind, zero errors); the lag is the only
+                  observable symptom. Healthy = 0-2 blocks. */}
+              {data.polling.hbdSourceLagBlocks !== null && (() => {
+                const lag = data.polling.hbdSourceLagBlocks;
+                const frozen = lag > 100; // > ~5 min of blocks (3s each)
+                const checkedAgo = data.polling.hbdSourceLagCheckedAt
+                  ? Date.now() - new Date(data.polling.hbdSourceLagCheckedAt).getTime()
+                  : null;
+                return (
+                  <p className={`mt-2 text-xs font-mono ${frozen ? 'text-red-400' : 'text-zinc-500'}`}>
+                    HBD source lag: {lag} block{lag === 1 ? '' : 's'}
+                    {frozen ? ` (~${(lag * 3 / 3600).toFixed(1)}h behind — indexer frozen?)` : ''}
+                    {checkedAgo !== null ? ` — checked ${formatMs(checkedAgo)} ago` : ''}
                   </p>
                 );
               })()}

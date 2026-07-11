@@ -84,6 +84,18 @@ export function blockToOperationId(blockNum: bigint | number): bigint {
 }
 
 /**
+ * How far the HBD source table's newest row lags behind the raw HAF head
+ * block. hafsql.operation_transfer_table is filled by a separate indexer
+ * process that can freeze while queries keep succeeding with zero new rows
+ * (2026-07-10 backup server: ~19h behind, zero errors reported). The lag is
+ * the only observable symptom. Hive has transfers in nearly every block, so
+ * a healthy lag is 0-2 blocks.
+ */
+export function computeSyncLagBlocks(headBlock: bigint, maxOperationId: bigint): bigint {
+  return headBlock - (maxOperationId >> BigInt(32));
+}
+
+/**
  * Lower bound for the Hive-Engine catch-up query: the min cursor, but never
  * further back than `windowBlocks` behind the head block. Bounds the scan
  * when cursors are missing ('0') without ever excluding ids a real cursor

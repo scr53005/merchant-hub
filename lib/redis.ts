@@ -117,6 +117,8 @@ export interface PollingState {
   poller?: string;
   mode?: 'active-6s' | 'sleeping-1min';
   lastPollError?: string; // "<ISO timestamp> <message>" of the last failed poll (not cleared on success)
+  hbdSourceLagBlocks?: string;    // How far hafsql.operation_transfer_table lags behind HAF head (blocks)
+  hbdSourceLagCheckedAt?: string; // ISO timestamp of the last sync-lag check (throttled to ~1/min)
   // Dynamic lastId fields: "{account}:{currency}" -> id
   // e.g., "indies.cafe:HBD" -> "12345"
   [key: string]: string | undefined;

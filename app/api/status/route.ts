@@ -116,6 +116,12 @@ export async function GET() {
       // Last failed poll ("<ISO timestamp> <message>") — check the timestamp:
       // it is NOT cleared by successful polls
       lastPollError: pollingState.lastPollError || null,
+      // HBD source staleness: hafsql.operation_transfer_table's newest row vs
+      // the raw HAF head block. Healthy = 0-2; large = the HAFSQL indexer is
+      // frozen and HBD polls succeed while seeing nothing (2026-07 incident).
+      // A block count fits comfortably in a Number (< 2^31).
+      hbdSourceLagBlocks: pollingState.hbdSourceLagBlocks != null ? Number(pollingState.hbdSourceLagBlocks) : null,
+      hbdSourceLagCheckedAt: pollingState.hbdSourceLagCheckedAt || null,
     };
 
     // Per-restaurant info

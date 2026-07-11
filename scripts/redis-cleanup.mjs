@@ -278,7 +278,7 @@ async function clearPoller() {
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER); // 9007199254740991
 const CURSOR_CEILING = BigInt('10000000000000000000'); // 10^19
 // Non-cursor fields in the polling:state hash (everything else is {account}:{currency})
-const META_FIELDS = new Set(['heartbeat', 'cronLastPoll', 'poller', 'mode', 'lastPollError']);
+const META_FIELDS = new Set(['heartbeat', 'cronLastPoll', 'poller', 'mode', 'lastPollError', 'hbdSourceLagBlocks', 'hbdSourceLagCheckedAt']);
 
 function diagnoseCursor(value) {
   if (!/^\d+$/.test(value)) return 'INVALID — not an integer, poller will fall back to 0';

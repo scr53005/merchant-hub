@@ -5,7 +5,7 @@ import { Pool } from 'pg';
 import { Transfer, RestaurantConfig, Currency } from '@/types';
 import { getAllAccounts } from './config';
 import { getPollingState, updatePollingState, getLastIdFromState, buildLastIdUpdate, publishTransfer } from './redis';
-import { computeMinCursor, computeCatchupLowerBound } from './polling-state';
+import { computeMinCursor, computeCatchupLowerBound, computeSyncLagBlocks } from './polling-state';
 
 const hafPool = new Pool({
   connectionString: process.env.HAF_CONNECTION_STRING,
@@ -13,6 +13,11 @@ const hafPool = new Pool({
   // PgBouncer queuing). Must stay well under the routes' maxDuration.
   query_timeout: 60000,
 });
+
+// Sync-lag check throttle: one extra statement per minute, not per 6s poll —
+// bounds both the SQL cost during provider degradation (a statement can take
+// 45s+) and the Redis writes on quiet polls.
+const SYNC_LAG_CHECK_INTERVAL_MS = 60_000;
 
 /**
  * Main polling function - polls HAF for all restaurants and all currencies
@@ -79,6 +84,40 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
         console.error(`[POLLING] ${symbol} polling failed:`, error.message);
         pollErrors.push(`${symbol}: ${error.message}`);
         break;
+      }
+    }
+
+    // Sync-lag check (throttled): the HBD source is a derived table filled by
+    // a separate HAFSQL indexer — it can freeze while queries keep succeeding
+    // with zero new rows (2026-07-10 backup server: ~19h behind, zero errors).
+    // Compare its newest row's block (id >> 32) against the raw HAF head block
+    // and surface the lag in /api/status + dashboard. Skipped when this poll
+    // already failed: no point burning another query timeout on a down provider.
+    if (pollErrors.length === 0) {
+      try {
+        const lastChecked = pollingState.hbdSourceLagCheckedAt
+          ? Date.parse(String(pollingState.hbdSourceLagCheckedAt))
+          : NaN;
+        if (isNaN(lastChecked) || Date.now() - lastChecked > SYNC_LAG_CHECK_INTERVAL_MS) {
+          // Single statement for both values so they come from the same snapshot
+          const lagResult = await hafPool.query(
+            `SELECT (SELECT num FROM hafd.blocks ORDER BY num DESC LIMIT 1) AS head_block,
+                    (SELECT id FROM hafsql.operation_transfer_table ORDER BY id DESC LIMIT 1) AS max_transfer_id`
+          );
+          const row = lagResult.rows[0];
+          if (row?.head_block != null && row?.max_transfer_id != null) {
+            const lagBlocks = computeSyncLagBlocks(BigInt(row.head_block), BigInt(row.max_transfer_id));
+            // Piggybacks on the lastIds HMSET below (same Redis write)
+            lastIdUpdates['hbdSourceLagBlocks'] = lagBlocks.toString();
+            lastIdUpdates['hbdSourceLagCheckedAt'] = new Date().toISOString();
+            if (lagBlocks > BigInt(100)) {
+              console.warn(`[POLLING] HBD source lag: ${lagBlocks.toString()} blocks behind head — operation_transfer_table indexer may be frozen`);
+            }
+          }
+        }
+      } catch (error: any) {
+        // Diagnostics only — never let the lag check break a working poll
+        console.error('[POLLING] Sync-lag check failed:', error.message);
       }
     }
 

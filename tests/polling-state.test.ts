@@ -12,6 +12,7 @@ import {
   computeMinCursor,
   blockToOperationId,
   computeCatchupLowerBound,
+  computeSyncLagBlocks,
 } from '../lib/polling-state';
 
 // A realistic HAF id observed on 2026-07-10 (max(id) on operation_transfer_table).
@@ -123,6 +124,25 @@ describe('blockToOperationId', () => {
 
   it('accepts both number and bigint block numbers', () => {
     expect(blockToOperationId(BigInt(108016200))).toBe(blockToOperationId(108016200));
+  });
+});
+
+describe('computeSyncLagBlocks', () => {
+  it('reproduces the 2026-07-11 frozen-indexer measurement exactly', () => {
+    // Observed live: newest operation_transfer_table row id 463924285501608706
+    // (block 108015790) while hafd.blocks head was 108038665 → 22875 blocks
+    // (~19h) behind, with every query succeeding. This lag was the ONLY
+    // observable symptom of the frozen backup-server indexer.
+    const lag = computeSyncLagBlocks(BigInt(108038665), BigInt('463924285501608706'));
+    expect(lag).toBe(BigInt(22875));
+  });
+
+  it('reports ~zero lag for a healthy indexer', () => {
+    const head = BigInt(108038665);
+    const idInHeadBlock = blockToOperationId(head) + BigInt(7);
+    expect(computeSyncLagBlocks(head, idInHeadBlock)).toBe(BigInt(0));
+    const idOneBlockBack = blockToOperationId(head - BigInt(1)) + BigInt(3);
+    expect(computeSyncLagBlocks(head, idOneBlockBack)).toBe(BigInt(1));
   });
 });
 

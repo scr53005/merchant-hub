@@ -41,6 +41,9 @@ export const hafsqlSource: PollingSource = {
       amount: row.amount.toString(),
       memo: row.memo,
       received_at: new Date().toISOString(),
+      // id >> 32 = block_num (verified against hive.operations_view) — the
+      // publish dedupe key needs it and it's free here
+      block_num: Number(BigInt(row.id) >> BigInt(32)),
     }));
   },
 

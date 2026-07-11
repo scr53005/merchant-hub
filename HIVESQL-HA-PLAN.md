@@ -118,23 +118,26 @@ HAFSQL for a known historical block range.
 Two cursor namespaces in `polling:state`, never mixed:
 
 - **HAF (existing, unchanged):** `{account}:{currency}` → 64-bit HAF op id.
-- **HiveSQL (new):** `hivesql:{account}:{currency}` → **block number**.
-  Block numbers are chain-truth and identical from every source; they fit in
-  a JS number but are stored/handled as strings anyway (house BigInt rules).
+- **HiveSQL (new):** `hivesql:{account}:{currency}` → **table ID**
+  (`TxTransfers.ID` for HBD, `TxCustoms.ID` for HE). *(Amended in Phase 2 —
+  originally block numbers.)* Two reasons: (a) a block-range filter on the
+  TxCustoms join times out (Phase 0 finding 4); (b) block cursors can TIE —
+  two same-block transfers split across a poll boundary would lose one,
+  violating duplicates-over-losses. Table IDs are unique and monotonic
+  (identity, insertion-ordered).
 
 Translation at the seams — coarse **by design**, the overlap is what the
 dedupe layer is for:
 
-- Failover (HAF → HiveSQL): `startBlock = hafCursor >> 32` (the block of the
-  last processed op). HiveSQL polling starts at `block_num > startBlock - OVERLAP_BLOCKS`
-  (proposal: `OVERLAP_BLOCKS = 20`, ~1 min) so nothing straddling the outage
-  edge is missed.
-- Failback (HiveSQL → HAF): `hafCursor = blockToOperationId(hivesqlCursor - OVERLAP_BLOCKS)`
-  (existing helper, `block << 32`). Re-fetches the overlap; dedupe absorbs it.
-
-Both translations are pure functions in `lib/polling-state.ts` with unit
-tests pinned to real observed id/block pairs (same style as
-`computeSyncLagBlocks`).
+- Failover (HAF → HiveSQL): `startBlock = (hafCursor >> 32) - OVERLAP_BLOCKS`
+  (proposal: `OVERLAP_BLOCKS = 20`, ~1 min), then
+  `seedCursorFromBlock(table, startBlock)` (lib/sources/hivesql.ts): a binary
+  search over the table-ID space with point-lookup probes (~30ms each, ~30
+  probes, once per failover) finds the largest ID at or before that block.
+- Failback (HiveSQL → HAF): read the block of the last HiveSQL row processed
+  (adapters carry `block_num` on every row), then
+  `hafCursor = blockToOperationId(block - OVERLAP_BLOCKS)` (existing helper).
+  Re-fetches the overlap; dedupe absorbs it.
 
 ---
 
@@ -176,9 +179,10 @@ dedupeKey = sha256(block_num | from | to | amount | symbol | memo)  // hex, trun
   different blocks → different keys; identical content in the *same* block is
   impossible for orders — the distriate suffix makes every order memo unique
   by construction).
-- Guard: `SET dedupe:{key} 1 NX EX 172800` (48h TTL). Reply `null` ⇒ already
-  published ⇒ skip. **1 Redis command per published transfer** — order volume
-  is tens/day, negligible against the per-poll budget.
+- Guard: `GET dedupe:{key}` before publish (hit ⇒ skip), `SET dedupe:{key} 1
+  EX 172800` (48h TTL) after successful publish. **2 Redis commands per
+  published transfer** — order volume is tens/day, negligible against the
+  per-poll budget. On any guard error, publish anyway (delivery beats dedupe).
 - Always-on (not seam-only) deliberately: it also absorbs the existing
   `sanitizeCursor` → `'0'` fallback re-fetches and any future cursor-reset
   recovery, which today rely solely on CO-page id-dedupe.
@@ -296,11 +300,15 @@ Extract `lib/sources/hafsql.ts` behind the interface; `pollAllTransfers`
 consumes the adapter. Zero behavior change; `npm test` green; deploy and
 soak.
 
-**Phase 2 — HiveSQL adapter + hub dedupe.**
-`lib/sources/hivesql.ts` + row mapping + cursor translation helpers (unit
-tests pinned to real pairs) + the Layer-1 dedupe guard (tested: same op from
-both sources → one publish). Not yet reachable in prod (no manager), but
-fully testable via script.
+**Phase 2 — HiveSQL adapter + hub dedupe. ✅ BUILT 2026-07-12 (deploy gate pending).**
+`lib/sources/hivesql.ts` (lazy pool, both fetchers, healthCheck with HiveSQL's
+own lag, `seedCursorFromBlock` binary search), pure helpers `lib/dedupe.ts` +
+`lib/sources/ids.ts` + `lib/sources/mssql-config.ts`, dedupe guard wired into
+the publish loop (check → publish → mark, always-on, active already under
+HAFSQL), HAF HBD rows now carry `block_num` (= id >> 32) for the key.
+Tests: `tests/hivesql-source.test.ts` pinned to the live parity sample.
+Deploying this phase turns on Layer-1 dedupe in prod; the HiveSQL adapter
+stays unreachable until Phase 3.
 
 **Phase 3 — Source manager.**
 State machine of §7, `POST /api/source` (Bearer `ADMIN_TOKEN`) + dashboard

@@ -9,8 +9,9 @@
 
 import { Transfer, RestaurantConfig } from '@/types';
 import { getAllAccounts } from './config';
-import { getPollingState, updatePollingState, getLastIdFromState, buildLastIdUpdate, publishTransfer } from './redis';
+import { getPollingState, updatePollingState, getLastIdFromState, buildLastIdUpdate, publishTransfer, wasRecentlyPublished, markPublished } from './redis';
 import { computeMinCursor } from './polling-state';
+import { computeDedupeKey } from './dedupe';
 import { PollingSource } from './sources/types';
 import { hafsqlSource } from './sources/hafsql';
 
@@ -123,11 +124,45 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
     // cursors: a failure between the two then causes a re-fetch + re-publish
     // (duplicates, deduped by CO pages) instead of a silent permanent loss
     // (cursor advanced, transfer never published).
+    //
+    // Layer-1 dedupe (HIVESQL-HA-PLAN.md §6): the content key is chain-truth
+    // only, so the same on-chain transfer collides no matter which source
+    // fetched it — this is what makes a source failover seam safe. Ordering
+    // is CHECK → publish → MARK: a crash between publish and mark
+    // re-publishes once (duplicates over losses); mark-first could suppress
+    // a transfer forever. The guard itself must never block delivery — on
+    // any dedupe error, publish anyway.
     for (const transfer of allTransfers) {
       // Look up the env for this transfer's to_account
       const context = accountToContext.get(transfer.to_account);
       const env = context?.env || 'prod';
+
+      let dedupeKey: string | null = null;
+      try {
+        dedupeKey = computeDedupeKey(
+          transfer.block_num, transfer.from_account, transfer.to_account,
+          transfer.amount, transfer.symbol, transfer.memo
+        );
+        if (await wasRecentlyPublished(dedupeKey)) {
+          console.warn(`[POLLING] DEDUPE - skipping already-published transfer ${transfer.id} (${transfer.symbol} ${transfer.amount} to ${transfer.to_account}, block ${transfer.block_num})`);
+          continue;
+        }
+      } catch (error: any) {
+        console.error('[POLLING] Dedupe check failed (publishing anyway):', error.message);
+        dedupeKey = null;
+      }
+
       await publishTransfer(transfer.restaurant_id, env, transfer);
+
+      if (dedupeKey) {
+        try {
+          await markPublished(dedupeKey);
+        } catch (error: any) {
+          // Worst case: a later re-fetch re-publishes this transfer once —
+          // the safe direction
+          console.error('[POLLING] Dedupe mark failed:', error.message);
+        }
+      }
     }
 
     // Update all lastIds in one operation
@@ -239,6 +274,8 @@ async function pollHBDBatched(
       memo: row.memo,
       parsed_memo: row.memo,
       received_at: row.received_at,
+      // Chain-truth block — the publish dedupe key depends on it
+      block_num: row.block_num,
     });
   }
 

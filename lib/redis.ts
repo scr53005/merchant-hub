@@ -65,6 +65,24 @@ export async function publishTransfer(restaurantId: string, env: 'prod' | 'dev',
   await redis.xadd(`transfers:${restaurantId}:${env}`, '*', transfer);
 }
 
+// ── Layer-1 publish dedupe guard (HIVESQL-HA-PLAN.md §6) ──────────────────
+// Ordering contract: CHECK before publish, MARK after successful publish.
+// A crash between publish and mark re-publishes once (safe direction:
+// duplicates over losses); mark-then-publish could suppress a transfer
+// forever. TTL must exceed any realistic failover-seam or cursor-reset
+// re-fetch window.
+
+const DEDUPE_TTL_SECONDS = 172800; // 48h
+
+export async function wasRecentlyPublished(dedupeKey: string): Promise<boolean> {
+  const value = await redis.get(`dedupe:${dedupeKey}`);
+  return value !== null && value !== undefined;
+}
+
+export async function markPublished(dedupeKey: string): Promise<void> {
+  await redis.set(`dedupe:${dedupeKey}`, '1', { ex: DEDUPE_TTL_SECONDS });
+}
+
 export async function publishSystemBroadcast(broadcast: {
   type: string;
   poller?: string;

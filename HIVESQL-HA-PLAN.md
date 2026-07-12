@@ -325,11 +325,21 @@ one-click toggle (token kept in localStorage) + `set-source` CLI fallback
 last transition times. **New env vars needed before deploy: `ADMIN_TOKEN`
 (+ optionally `HIVESQL_CONNECTION_STRING`, required for any actual failover).**
 
-**Phase 4 — E2E in DEV, then arm.**
-`set-source hivesql` forced, place a test order on a dev account, verify CO
-page delivery end-to-end. Then the seam test: order on HAFSQL → force switch
-→ verify the overlap re-fetch is absorbed by dedupe (kitchen sees exactly
-one). Then `set-source auto` in prod.
+**Phase 4 — E2E in DEV, then arm. ✅ PASSED 2026-07-12.**
+Via the dashboard toggle (auth 401s verified first): forced hivesql → cursors
+seeded (logs confirmed) → zenbar-dev Flow 6 order delivered to the CO page
+with id `4611686018525398565` (= 2^62 + TxTransfers.ID 98010661 — HBD band,
+BigInt insert into the spoke's bigint PK proven live). Seam test: second
+order via HiveSQL → forced back to HAFSQL within the 20-block overlap → CO
+page kept exactly ONE instance; Vercel logs showed
+`[POLLING] DEDUPE - skipping already-published transfer 464142864977235714`
+(the HAF-namespace re-fetch of the HiveSQL-published transfer — cross-source
+content-key dedupe working in prod). Ended on `auto`; lastFailoverAt /
+lastFailbackAt populated. **The HA system is live and armed.**
+Incidental finding during the E2E: a Next dev-server cold-compile can eat a
+POST arriving mid-compile (the zenbar order freeze) — dev-only, not a
+merchant-hub issue; zenbar got gentle error copy + 45s fetch timeouts out of
+it (zenbar repo, `lib/innopay/customer-error.ts`).
 
 **Phase 5 (optional, per-spoke) — Layer-2 memo-suffix dedupe** in CO pages +
 SPOKE-DOCUMENTATION.md pattern write-up.

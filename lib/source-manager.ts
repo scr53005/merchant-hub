@@ -11,6 +11,7 @@ import { hafsqlSource } from './sources/hafsql';
 import { hivesqlSource, seedCursorFromBlock } from './sources/hivesql';
 import {
   SourceName,
+  StateLike,
   resolveSourceName,
   updateErrorStreak,
   shouldFailover,
@@ -32,7 +33,7 @@ export function cursorAccount(sourceName: SourceName, account: string): string {
   return sourceName === 'hivesql' ? `hivesql:${account}` : account;
 }
 
-function minCursorBlock(state: Record<string, string>, accounts: string[], currencies: readonly string[]): bigint | null {
+function minCursorBlock(state: StateLike, accounts: string[], currencies: readonly string[]): bigint | null {
   let min: bigint | null = null;
   for (const account of accounts) {
     for (const currency of currencies) {
@@ -51,7 +52,7 @@ function minCursorBlock(state: Record<string, string>, accounts: string[], curre
  * flip activeSource. Throws if HiveSQL is unreachable — the caller stays on
  * HAFSQL and retries next poll.
  */
-export async function performFailover(state: Record<string, string>, reason: string): Promise<void> {
+export async function performFailover(state: StateLike, reason: string): Promise<void> {
   console.warn(`[SOURCE] FAILOVER to HiveSQL: ${reason}`);
 
   const health = await hivesqlSource.healthCheck();
@@ -121,7 +122,7 @@ export async function performFailback(hafsqlHeadBlock: bigint): Promise<void> {
  * Never throws — the state machine must not break a working poll.
  */
 export async function runSourceStateMachine(
-  effectiveState: Record<string, string>,
+  effectiveState: StateLike,
   hadErrors: boolean
 ): Promise<Record<string, string>> {
   try {

@@ -20,7 +20,9 @@ export const SEAM_OVERLAP_BLOCKS = BigInt(20);
 // cursor) would republish orders whose dedupe keys have expired.
 export const FAILOVER_CATCHUP_BLOCKS = BigInt(10000);
 
-type StateLike = Record<string, string | undefined>;
+// Loose structural view of the polling:state hash — PollingState (and any
+// spread/merge of it) is assignable to this, unlike the reverse.
+export type StateLike = Record<string, string | undefined>;
 
 export function isForced(state: StateLike): boolean {
   return state.forcedSource === 'hafsql' || state.forcedSource === 'hivesql';

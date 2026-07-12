@@ -210,7 +210,7 @@ export function getModeFromState(state: PollingState): 'active-6s' | 'sleeping-1
  * @param currency - Currency symbol (e.g., 'HBD')
  * @returns LastId or '0' if not found
  */
-export function getLastIdFromState(state: PollingState, account: string, currency: string): string {
+export function getLastIdFromState(state: Record<string, string | undefined>, account: string, currency: string): string {
   const key = `${account}:${currency}`;
   // Defense in depth: even if a non-string or garbage value lands in the
   // hash, never let it reach BigInt()/SQL — warn and fall back to '0'.

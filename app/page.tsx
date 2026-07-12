@@ -43,6 +43,12 @@ interface StatusData {
     lastPollError: string | null;
     hbdSourceLagBlocks: number | null;
     hbdSourceLagCheckedAt: string | null;
+    activeSource: 'hafsql' | 'hivesql';
+    forcedSource: 'hafsql' | 'hivesql' | null;
+    hafsqlErrorStreakSince: string | null;
+    hafsqlRecoveryProbes: number;
+    lastFailoverAt: string | null;
+    lastFailbackAt: string | null;
   };
   restaurants: RestaurantStatus[];
   systemBroadcasts: StreamInfo;
@@ -91,6 +97,41 @@ export default function Dashboard() {
       setError(err.message || 'Failed to fetch status');
     }
   }, []);
+
+  // One-click source override (HIVESQL-HA-PLAN.md §7). Token is asked for
+  // once and kept in localStorage; the API rejects bad tokens with 401.
+  const setSource = useCallback(async (source: 'hafsql' | 'hivesql' | 'auto') => {
+    const label = source === 'auto' ? 'return to AUTO mode' : `switch the data source to ${source.toUpperCase()}`;
+    if (!window.confirm(`Really ${label}?\n\nA source switch re-fetches a small overlap window; the publish dedupe absorbs it (no duplicate kitchen orders expected).`)) {
+      return;
+    }
+    let token = localStorage.getItem('mh_admin_token');
+    if (!token) {
+      token = window.prompt('Admin token:');
+      if (!token) return;
+    }
+    try {
+      const res = await fetch('/api/source', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ source }),
+      });
+      if (res.status === 401) {
+        localStorage.removeItem('mh_admin_token');
+        alert('Invalid admin token — it has been forgotten, try again.');
+        return;
+      }
+      const json = await res.json();
+      if (!res.ok) {
+        alert(`Source switch failed: ${json.error}`);
+        return;
+      }
+      localStorage.setItem('mh_admin_token', token);
+      await fetchStatus();
+    } catch (err: any) {
+      alert(`Source switch failed: ${err.message}`);
+    }
+  }, [fetchStatus]);
 
   useEffect(() => {
     fetchStatus();
@@ -258,6 +299,48 @@ export default function Dashboard() {
                   </p>
                 );
               })()}
+              {/* HA data source (HIVESQL-HA-PLAN.md §7): which provider feeds
+                  the pollers, with the one-click override. hafsql+auto is the
+                  quiet normal; anything else is loud. */}
+              <div className="mt-4 pt-4 border-t border-zinc-800 flex flex-wrap items-center gap-3">
+                <span className="text-xs text-zinc-500 uppercase tracking-wider">Data source</span>
+                <span className={`text-xs px-2 py-0.5 rounded-full font-mono ${
+                  data.polling.activeSource === 'hafsql'
+                    ? 'bg-zinc-800 text-zinc-300 border border-zinc-700'
+                    : 'bg-red-950 text-red-400 border border-red-800'
+                }`}>
+                  {(data.polling.activeSource || 'hafsql').toUpperCase()}
+                </span>
+                <span className={`text-xs font-mono ${data.polling.forcedSource ? 'text-yellow-400' : 'text-zinc-600'}`}>
+                  {data.polling.forcedSource ? `forced (${data.polling.forcedSource})` : 'auto'}
+                </span>
+                {data.polling.activeSource === 'hivesql' && data.polling.lastFailoverAt && (
+                  <span className="text-xs font-mono text-red-400">
+                    failed over {formatMs(Date.now() - new Date(data.polling.lastFailoverAt).getTime())} ago
+                    {data.polling.hafsqlRecoveryProbes > 0 ? ` — HAFSQL recovery ${data.polling.hafsqlRecoveryProbes}/3` : ''}
+                  </span>
+                )}
+                {data.polling.activeSource === 'hafsql' && data.polling.hafsqlErrorStreakSince && (
+                  <span className="text-xs font-mono text-yellow-400">
+                    error streak since {new Date(data.polling.hafsqlErrorStreakSince).toLocaleTimeString()}
+                  </span>
+                )}
+                <span className="flex-1" />
+                <button
+                  onClick={() => setSource(data.polling.activeSource === 'hafsql' ? 'hivesql' : 'hafsql')}
+                  className="px-3 py-1 text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-md transition-colors text-zinc-300"
+                >
+                  Switch to {data.polling.activeSource === 'hafsql' ? 'HiveSQL' : 'HAFSQL'}
+                </button>
+                {data.polling.forcedSource && (
+                  <button
+                    onClick={() => setSource('auto')}
+                    className="px-3 py-1 text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-md transition-colors text-zinc-300"
+                  >
+                    Back to auto
+                  </button>
+                )}
+              </div>
             </section>
 
             {/* Restaurants */}

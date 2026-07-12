@@ -12,6 +12,7 @@ import {
   execRaw,
 } from '@/lib/redis';
 import { RESTAURANTS, POLLING_CONFIG, REDIS_KEYS } from '@/lib/config';
+import { resolveSourceName } from '@/lib/source-decision';
 
 interface ConsumerGroupInfo {
   name: string;
@@ -122,6 +123,14 @@ export async function GET() {
       // A block count fits comfortably in a Number (< 2^31).
       hbdSourceLagBlocks: pollingState.hbdSourceLagBlocks != null ? Number(pollingState.hbdSourceLagBlocks) : null,
       hbdSourceLagCheckedAt: pollingState.hbdSourceLagCheckedAt || null,
+      // HA failover state machine (HIVESQL-HA-PLAN.md §7)
+      activeSource: resolveSourceName(pollingState),
+      forcedSource: pollingState.forcedSource === 'hafsql' || pollingState.forcedSource === 'hivesql'
+        ? pollingState.forcedSource : null,
+      hafsqlErrorStreakSince: pollingState.hafsqlErrorStreakSince || null,
+      hafsqlRecoveryProbes: pollingState.hafsqlRecoveryProbes ? Number(pollingState.hafsqlRecoveryProbes) : 0,
+      lastFailoverAt: pollingState.lastFailoverAt || null,
+      lastFailbackAt: pollingState.lastFailbackAt || null,
     };
 
     // Per-restaurant info

@@ -310,11 +310,20 @@ Tests: `tests/hivesql-source.test.ts` pinned to the live parity sample.
 Deploying this phase turns on Layer-1 dedupe in prod; the HiveSQL adapter
 stays unreachable until Phase 3.
 
-**Phase 3 — Source manager.**
-State machine of §7, `POST /api/source` (Bearer `ADMIN_TOKEN`) + dashboard
-one-click toggle, `set-source` script command as CLI fallback, dashboard +
-`/api/status` fields. Unit tests for the trigger/hysteresis logic (pure
-functions on state fields).
+**Phase 3 — Source manager. ✅ BUILT 2026-07-12 (deploy gate pending).**
+Decisions in pure `lib/source-decision.ts` (tested:
+`tests/source-decision.test.ts`); transitions + bookkeeping in
+`lib/source-manager.ts` (failover seeds both HiveSQL cursors via one binary
+search per table shared by all accounts; failback jumps every HAF cursor to
+head − overlap — everything older was delivered via HiveSQL). Orchestrator
+resolves the source per poll and scopes cursor keys
+(`hivesql:{account}:{currency}`). `POST /api/source` (Bearer `ADMIN_TOKEN`,
+performs the full transition so the next poll is correct) + dashboard
+one-click toggle (token kept in localStorage) + `set-source` CLI fallback
+(raw write, no seeding — the adapter's zero-cursor 8h floor keeps it safe).
+`/api/status` + dashboard expose activeSource / forced / streak / probes /
+last transition times. **New env vars needed before deploy: `ADMIN_TOKEN`
+(+ optionally `HIVESQL_CONNECTION_STRING`, required for any actual failover).**
 
 **Phase 4 — E2E in DEV, then arm.**
 `set-source hivesql` forced, place a test order on a dev account, verify CO

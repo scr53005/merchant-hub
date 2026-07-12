@@ -13,10 +13,8 @@ import { getPollingState, updatePollingState, getLastIdFromState, buildLastIdUpd
 import { computeMinCursor } from './polling-state';
 import { computeDedupeKey } from './dedupe';
 import { PollingSource } from './sources/types';
-import { hafsqlSource } from './sources/hafsql';
-
-// Phase 3 replaces this with the source manager's choice
-const activeSource: PollingSource = hafsqlSource;
+import { resolveSourceName } from './source-decision';
+import { getSourceByName, cursorAccount, runSourceStateMachine } from './source-manager';
 
 // Sync-lag check throttle: one extra statement per minute, not per 6s poll —
 // bounds both the SQL cost during provider degradation (a statement can take
@@ -40,6 +38,15 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
     // Redis cost: 1 HGETALL
     const pollingState = await getPollingState();
     console.log('[POLLING] Retrieved polling state from single hash');
+
+    // Resolve the active source for THIS poll (forced > last transition >
+    // hafsql). The failover/failback state machine runs at the end of the
+    // poll; every poll re-reads the decision from state, so a transition —
+    // auto or via POST /api/source — takes effect on the very next poll.
+    const activeSource: PollingSource = getSourceByName(resolveSourceName(pollingState));
+    if (activeSource.name !== 'hafsql') {
+      console.warn(`[POLLING] Active source: ${activeSource.name}`);
+    }
 
     // Get ALL accounts (both prod and dev for all restaurants)
     const accountConfigs = getAllAccounts();
@@ -165,6 +172,16 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
       }
     }
 
+    // Failover/failback state machine: error-streak bookkeeping and, when a
+    // trigger fires, the transition itself (which writes its own state).
+    // Runs AFTER publishing so a transition never races this poll's cursors;
+    // routine bookkeeping rides the HMSET below. Never throws.
+    const machineUpdates = await runSourceStateMachine(
+      { ...pollingState, ...lastIdUpdates },
+      pollErrors.length > 0
+    );
+    Object.assign(lastIdUpdates, machineUpdates);
+
     // Update all lastIds in one operation
     // Redis cost: 1 HMSET (updates all changed lastIds at once)
     if (Object.keys(lastIdUpdates).length > 0) {
@@ -208,10 +225,13 @@ async function pollHBDBatched(
 ): Promise<Transfer[]> {
   if (allAccounts.length === 0) return [];
 
-  // Get cursor for each ACCOUNT from polling state (no Redis calls)
+  // Get cursor for each ACCOUNT from polling state (no Redis calls).
+  // Cursor keys are source-scoped: HAF cursors are op ids under
+  // {account}:{currency}; HiveSQL cursors are table IDs under
+  // hivesql:{account}:{currency} — the two namespaces must never mix.
   const accountLastIds = new Map<string, bigint>();
   for (const account of allAccounts) {
-    const lastIdStr = getLastIdFromState(pollingState, account, 'HBD');
+    const lastIdStr = getLastIdFromState(pollingState, cursorAccount(source.name, account), 'HBD');
     accountLastIds.set(account, BigInt(lastIdStr));
   }
   // True min across cursors — never seed with a numeric "+infinity": real HAF
@@ -282,7 +302,7 @@ async function pollHBDBatched(
   // Build cursor updates for each account that received transfers
   // These will be batched together in pollAllTransfers
   for (const [account, maxId] of accountMaxIds) {
-    Object.assign(lastIdUpdates, buildLastIdUpdate(account, 'HBD', maxId.toString()));
+    Object.assign(lastIdUpdates, buildLastIdUpdate(cursorAccount(source.name, account), 'HBD', maxId.toString()));
     console.log(`[HBD BATCHED] Queued lastId update to ${maxId.toString()} for ${account}`);
   }
 
@@ -305,10 +325,11 @@ async function pollHiveEngineTokenBatched(
 ): Promise<Transfer[]> {
   if (allAccounts.length === 0) return [];
 
-  // Get cursor for each ACCOUNT from polling state (no Redis calls)
+  // Get cursor for each ACCOUNT from polling state (no Redis calls).
+  // Source-scoped keys — see pollHBDBatched.
   const accountLastIds = new Map<string, bigint>();
   for (const account of allAccounts) {
-    const lastIdStr = getLastIdFromState(pollingState, account, symbol);
+    const lastIdStr = getLastIdFromState(pollingState, cursorAccount(source.name, account), symbol);
     accountLastIds.set(account, BigInt(lastIdStr));
   }
   // True min across cursors — see pollHBDBatched for why no numeric seed.
@@ -409,7 +430,7 @@ async function pollHiveEngineTokenBatched(
   // Build cursor updates for each account that received transfers
   // These will be batched together in pollAllTransfers
   for (const [account, maxId] of accountMaxIds) {
-    Object.assign(lastIdUpdates, buildLastIdUpdate(account, symbol, maxId.toString()));
+    Object.assign(lastIdUpdates, buildLastIdUpdate(cursorAccount(source.name, account), symbol, maxId.toString()));
     console.log(`[${symbol} BATCHED] Queued lastId update to ${maxId.toString()} for ${account}`);
   }
 

@@ -14,6 +14,7 @@
 //   clear-poller                          Kill zombie poller lock so next CO page can take over
 //   state-dump                            Dump polling:state hash with per-cursor diagnosis
 //   set-cursor <account:CUR> <id>         Set a lastId cursor (e.g. set-cursor indies.cafe:HBD 463839730480448002)
+//   set-source <hafsql|hivesql|auto>      Force the polling data source (raw write; prefer the dashboard toggle)
 //
 // Environment:
 //   Reads KV_REST_API_URL and KV_REST_API_TOKEN from .env.local (or environment)
@@ -278,14 +279,23 @@ async function clearPoller() {
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER); // 9007199254740991
 const CURSOR_CEILING = BigInt('10000000000000000000'); // 10^19
 // Non-cursor fields in the polling:state hash (everything else is {account}:{currency})
-const META_FIELDS = new Set(['heartbeat', 'cronLastPoll', 'poller', 'mode', 'lastPollError', 'hbdSourceLagBlocks', 'hbdSourceLagCheckedAt']);
+const META_FIELDS = new Set([
+  'heartbeat', 'cronLastPoll', 'poller', 'mode', 'lastPollError',
+  'hbdSourceLagBlocks', 'hbdSourceLagCheckedAt',
+  // HA failover state machine (HIVESQL-HA-PLAN.md §7)
+  'activeSource', 'forcedSource', 'hafsqlErrorStreakSince',
+  'hafsqlRecoveryProbes', 'hafsqlLastProbeAt', 'lastFailoverAt', 'lastFailbackAt',
+]);
 
-function diagnoseCursor(value) {
+function diagnoseCursor(field, value) {
   if (!/^\d+$/.test(value)) return 'INVALID — not an integer, poller will fall back to 0';
   const v = BigInt(value);
   if (v === BigInt(0)) return 'zero — no lower bound, per-account filter takes over';
   if (v === MAX_SAFE) return 'POISONED — equals Number.MAX_SAFE_INTEGER sentinel';
   if (v > CURSOR_CEILING) return 'ABERRANT — above 10^19 plausibility ceiling';
+  // hivesql:{account}:{currency} cursors are TABLE IDs (TxTransfers ~1e8,
+  // TxCustoms ~2.7e9) — small values are NORMAL there, not corruption
+  if (field.startsWith('hivesql:')) return 'ok (hivesql table-id cursor)';
   if (v <= MAX_SAFE) return 'SUSPICIOUS — below current HAF id range (~4.6e17), stale or corrupted';
   return 'ok';
 }
@@ -312,8 +322,8 @@ async function stateDump() {
   const cursorFields = fields.filter((f) => !META_FIELDS.has(f)).sort();
   let flagged = 0;
   for (const field of cursorFields) {
-    const diagnosis = diagnoseCursor(state[field]);
-    if (diagnosis !== 'ok') flagged++;
+    const diagnosis = diagnoseCursor(field, state[field]);
+    if (!diagnosis.startsWith('ok')) flagged++;
     console.log(`  ${field.padEnd(28)} = ${state[field].padStart(20)}  [${diagnosis}]`);
   }
   console.log(`\n${cursorFields.length} cursors, ${flagged} flagged.`);
@@ -333,8 +343,8 @@ async function setCursor(field, value) {
     console.error(`Refusing to set non-integer cursor value: ${JSON.stringify(value)}`);
     process.exit(1);
   }
-  const diagnosis = diagnoseCursor(value);
-  if (diagnosis !== 'ok' && value !== '0') {
+  const diagnosis = diagnoseCursor(field, value);
+  if (!diagnosis.startsWith('ok') && value !== '0') {
     console.warn(`Warning: new value looks off — [${diagnosis}]. Setting it anyway.`);
   }
   const state = parseHgetall(await execRedis(['HGETALL', 'polling:state']));
@@ -342,6 +352,21 @@ async function setCursor(field, value) {
   console.log(`\n  ${field}: ${oldValue === undefined ? '(not set)' : oldValue} → ${value}`);
   await execRedis(['HSET', 'polling:state', field, value]);
   console.log('  Done. Run "state-dump" to verify.');
+}
+
+async function setSource(source) {
+  if (source !== 'hafsql' && source !== 'hivesql' && source !== 'auto') {
+    console.error('Usage: set-source <hafsql|hivesql|auto>');
+    process.exit(1);
+  }
+  // CLI fallback for when the dashboard/route is unreachable. Unlike
+  // POST /api/source this does NOT seed cursors — forcing hivesql here
+  // starts its cursors at 0 (adapter falls back to a newest-window fetch and
+  // the publish dedupe absorbs the overlap). Prefer the dashboard button.
+  console.warn('NOTE: prefer the dashboard toggle / POST /api/source — this raw write skips cursor seeding.');
+  const value = source === 'auto' ? '' : source;
+  await execRedis(['HSET', 'polling:state', 'forcedSource', value]);
+  console.log(`  forcedSource = ${value === '' ? '(cleared — auto)' : value}. Takes effect on the next poll.`);
 }
 
 // ── CLI dispatch ───────────────────────────────────────────────────────────
@@ -374,6 +399,9 @@ switch (command) {
   case 'set-cursor':
     await setCursor(args[0], args[1]);
     break;
+  case 'set-source':
+    await setSource(args[0]);
+    break;
   default:
     console.log(`Redis stream cleanup utility
 
@@ -388,5 +416,6 @@ Commands:
   clear-poller                       Kill zombie poller lock
   state-dump                         Dump polling:state with per-cursor diagnosis
   set-cursor <account:CUR> <id>      Set a lastId cursor to a known-good value
+  set-source <hafsql|hivesql|auto>   Force the polling data source (prefer the dashboard toggle)
 `);
 }

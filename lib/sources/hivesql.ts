@@ -68,8 +68,14 @@ export const hivesqlSource: PollingSource = {
     });
     request.input('minId', minCursor.toString());
 
-    // minCursor = TxTransfers.ID. A '0' cursor simply returns the newest 100
-    // rows — same policy as the HAFSQL adapter.
+    // minCursor = TxTransfers.ID. A '0' cursor (unseeded — e.g. the CLI
+    // set-source fallback) gets a ~8h block floor: without it "newest 100
+    // rows" can span weeks for quiet accounts, past the 48h dedupe TTL, and
+    // republish ancient orders as new. The block filter is fast here because
+    // the account filter is selective (95ms over 7 days, Phase 0).
+    const zeroCursorFloor = minCursor <= BigInt(0)
+      ? 'AND t.block_num > (SELECT MAX(block_num) - 10000 FROM Blocks)'
+      : '';
     const result = await request.query(
       `SELECT TOP 100 tt.ID, t.block_num, tt.[from], tt.[to], tt.amount, tt.memo, tt.timestamp
        FROM TxTransfers tt
@@ -78,6 +84,7 @@ export const hivesqlSource: PollingSource = {
          AND tt.amount_symbol = 'HBD'
          AND tt.type = 'transfer'
          AND tt.ID > @minId
+         ${zeroCursorFloor}
        ORDER BY tt.ID DESC`
     );
 

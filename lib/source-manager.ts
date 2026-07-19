@@ -22,7 +22,7 @@ import {
   FAILBACK_HEALTHY_PROBES,
 } from './source-decision';
 
-const HE_TOKENS = ['EURO', 'OCLT', 'LEI'] as const;
+const HE_TOKENS = ['EURO', 'OCLT', 'LEI', 'RUBIS'] as const;
 
 export function getSourceByName(name: SourceName): PollingSource {
   return name === 'hivesql' ? hivesqlSource : hafsqlSource;

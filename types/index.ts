@@ -17,7 +17,7 @@ export interface RestaurantConfig {
   };
 }
 
-export type Currency = 'HBD' | 'EURO' | 'HIVE' | 'OCLT' | 'LEI';
+export type Currency = 'HBD' | 'EURO' | 'HIVE' | 'OCLT' | 'LEI' | 'RUBIS';
 
 export interface Transfer {
   id: string;

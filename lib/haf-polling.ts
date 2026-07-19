@@ -83,11 +83,15 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
       pollErrors.push(`HBD: ${error.message}`);
     }
 
-    // Poll Hive-Engine tokens (EURO, OCLT, LEI) - ONE query per token.
+    // Poll Hive-Engine tokens (EURO, OCLT, LEI, RUBIS) - ONE query per token.
     // They share the same tables and query shape, so after one systemic
     // failure the remaining tokens are skipped instead of burning another
     // query timeout each.
-    for (const symbol of ['EURO', 'OCLT', 'LEI'] as const) {
+    // RUBIS (added 2026-07-19): the loyalty token — future redemptions
+    // ("a coffee for 100 RUBIS") are ordinary transfers to vendor accounts
+    // and must reach the tills; watching costs one extra query and zero
+    // rows until redemption launches. See HATCHERY-PLAN.md §10.
+    for (const symbol of ['EURO', 'OCLT', 'LEI', 'RUBIS'] as const) {
       try {
         const tokenTransfers = await pollHiveEngineTokenBatched(activeSource, symbol, accountList, accountToContext, pollingState, lastIdUpdates);
         allTransfers.push(...tokenTransfers);
@@ -311,13 +315,13 @@ async function pollHBDBatched(
 }
 
 /**
- * Poll Hive-Engine tokens (EURO, OCLT, LEI) for ALL restaurants in a single
- * batched source query. The adapter returns raw custom_json ops; symbol,
- * recipient and memo filtering happen here in application code.
+ * Poll Hive-Engine tokens (EURO, OCLT, LEI, RUBIS) for ALL restaurants in a
+ * single batched source query. The adapter returns raw custom_json ops;
+ * symbol, recipient and memo filtering happen here in application code.
  */
 async function pollHiveEngineTokenBatched(
   source: PollingSource,
-  symbol: 'EURO' | 'OCLT' | 'LEI',
+  symbol: 'EURO' | 'OCLT' | 'LEI' | 'RUBIS',
   allAccounts: string[],
   accountToContext: Map<string, { restaurant: RestaurantConfig; env: 'prod' | 'dev' }>,
   pollingState: any,

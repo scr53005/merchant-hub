@@ -19,12 +19,13 @@ export const RESTAURANTS: RestaurantConfig[] = [
       prod: parseAdditionalAccounts(process.env.INDIES_ADDITIONAL_PROD_ACCOUNTS),
       dev: parseAdditionalAccounts(process.env.INDIES_ADDITIONAL_DEV_ACCOUNTS),
     },
-    currencies: ['HBD', 'EURO', 'OCLT'],
+    currencies: ['HBD', 'EURO', 'OCLT', 'RUBIS'],
     memoFilters: {
       // Filter on distriate pattern - allows both dine-in (TABLE X) and takeaway orders
       HBD: '%-inno-%',
       EURO: '%-inno-%',
       OCLT: '%-inno-%',
+      RUBIS: '%-inno-%',
     },
   },
   {
@@ -38,12 +39,13 @@ export const RESTAURANTS: RestaurantConfig[] = [
       prod: parseAdditionalAccounts(process.env.CROQUE_ADDITIONAL_PROD_ACCOUNTS),
       dev: parseAdditionalAccounts(process.env.CROQUE_ADDITIONAL_DEV_ACCOUNTS),
     },
-    currencies: ['HBD', 'EURO', 'OCLT'],
+    currencies: ['HBD', 'EURO', 'OCLT', 'RUBIS'],
     memoFilters: {
       // Filter on distriate pattern - allows both dine-in (TABLE X) and takeaway orders
       HBD: '%-inno-%',
       EURO: '%-inno-%',
       OCLT: '%-inno-%',
+      RUBIS: '%-inno-%',
     },
   },
   {
@@ -57,11 +59,36 @@ export const RESTAURANTS: RestaurantConfig[] = [
       prod: parseAdditionalAccounts(process.env.MILLEWEE_ADDITIONAL_PROD_ACCOUNTS),
       dev: parseAdditionalAccounts(process.env.MILLEWEE_ADDITIONAL_DEV_ACCOUNTS),
     },
-    currencies: ['HBD', 'EURO', 'OCLT'],
+    currencies: ['HBD', 'EURO', 'OCLT', 'RUBIS'],
     memoFilters: {
       HBD: '%-inno-%',
       EURO: '%-inno-%',
       OCLT: '%-inno-%',
+      RUBIS: '%-inno-%',
+    },
+  },
+  {
+    // Multi-tenant "Farm" spoke (innohatch): ONE merchant-hub entry serves the
+    // PoC on the shared dev account hatch-test; per-vendor accounts get their
+    // own entries (or registry-driven config) before real vendors onboard —
+    // see HATCHERY-PLAN.md §14 Phase 2. Prod account is a placeholder until
+    // a prod vendor exists (polling a nonexistent account returns no rows).
+    id: 'innohatch',
+    name: 'Innopay Farm (innohatch)',
+    accounts: {
+      prod: (process.env.INNOHATCH_ACCOUNT || 'innohatch').trim(),
+      dev: (process.env.INNOHATCH_DEV_ACCOUNT || 'hatch-test').trim(),
+    },
+    additionalAccounts: {
+      prod: parseAdditionalAccounts(process.env.INNOHATCH_ADDITIONAL_PROD_ACCOUNTS),
+      dev: parseAdditionalAccounts(process.env.INNOHATCH_ADDITIONAL_DEV_ACCOUNTS),
+    },
+    currencies: ['HBD', 'EURO', 'OCLT', 'RUBIS'],
+    memoFilters: {
+      HBD: '%-inno-%',
+      EURO: '%-inno-%',
+      OCLT: '%-inno-%',
+      RUBIS: '%-inno-%',
     },
   },
   {
@@ -77,11 +104,12 @@ export const RESTAURANTS: RestaurantConfig[] = [
       prod: parseAdditionalAccounts(process.env.ZENBAR_ADDITIONAL_PROD_ACCOUNTS),
       dev: parseAdditionalAccounts(process.env.ZENBAR_ADDITIONAL_DEV_ACCOUNTS),
     },
-    currencies: ['HBD', 'LEI', 'OCLT'],
+    currencies: ['HBD', 'LEI', 'OCLT', 'RUBIS'],
     memoFilters: {
       HBD: '%-inno-%',
       LEI: '%-inno-%',
       OCLT: '%-inno-%',
+      RUBIS: '%-inno-%',
     },
   },
 ];

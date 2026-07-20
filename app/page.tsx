@@ -27,6 +27,9 @@ interface RestaurantStatus {
     prod: Record<string, string>;
     dev: Record<string, string>;
   };
+  // Farm (Tier A) vendor accounts registered dynamically at hatch — one entry
+  // per account (a container spoke like innohatch holds many).
+  dynamicAccounts?: { account: string; env: 'prod' | 'dev'; lastIds: Record<string, string> }[];
 }
 
 interface StatusData {
@@ -443,6 +446,35 @@ export default function Dashboard() {
                           ))}
                         </div>
                       </div>
+
+                      {/* Farm (Tier A) vendors — PER ACCOUNT, since a container
+                          spoke like innohatch holds many. Pending is stream-level
+                          (shared stream, shown per env above); here we show each
+                          vendor account + its per-currency cursor. */}
+                      {r.dynamicAccounts && r.dynamicAccounts.length > 0 && (
+                        <div className="mt-3 border-t border-zinc-800 pt-3">
+                          <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">
+                            🌱 Vendors <span className="text-zinc-600">({r.dynamicAccounts.length})</span>
+                          </p>
+                          <div className="space-y-1">
+                            {r.dynamicAccounts.map(a => {
+                              const cursors = Object.entries(a.lastIds)
+                                .filter(([, id]) => id && id !== '0')
+                                .map(([c, id]) => `${c}:${formatLastId(id)}`)
+                                .join('  ');
+                              return (
+                                <div key={`${a.env}-${a.account}`} className="flex items-center justify-between text-xs bg-zinc-800/50 rounded px-2 py-1">
+                                  <span className="font-mono">
+                                    <span className={a.env === 'prod' ? 'text-emerald-500' : 'text-blue-500'}>{a.env}</span>{' '}
+                                    {a.account}
+                                  </span>
+                                  <span className="font-mono text-zinc-400">{cursors || 'no activity'}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}

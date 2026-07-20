@@ -12,6 +12,7 @@ import {
   execRaw,
 } from '@/lib/redis';
 import { RESTAURANTS, POLLING_CONFIG, REDIS_KEYS } from '@/lib/config';
+import { getDynamicAccounts } from '@/lib/dynamic-accounts';
 import { resolveSourceName } from '@/lib/source-decision';
 
 interface ConsumerGroupInfo {
@@ -133,6 +134,11 @@ export async function GET() {
       lastFailbackAt: pollingState.lastFailbackAt || null,
     };
 
+    // Dynamic (Farm) vendor accounts — registered at hatch, not in config.ts.
+    // Grouped per restaurant below so a container spoke (innohatch) can show
+    // its vendors PER-ACCOUNT, not just the per-spoke+env stream.
+    const dynamicAll = await getDynamicAccounts();
+
     // Per-restaurant info
     const restaurants = await Promise.all(
       RESTAURANTS.map(async (r) => {
@@ -167,6 +173,21 @@ export async function GET() {
           }
         }
 
+        // Dynamic Farm vendors under this spoke — one entry per account, with
+        // its own per-currency cursors. (Pending stays stream-level: all Farm
+        // vendors share transfers:{id}:{env}, the deliberate shared-stream
+        // design — per-account cursors are the meaningful per-account signal.)
+        const dynamicAccounts = dynamicAll
+          .filter((d) => d.restaurant.id === r.id)
+          .map((d) => {
+            const accLastIds: Record<string, string> = {};
+            for (const currency of r.currencies) {
+              accLastIds[currency] = getLastIdFromState(pollingState, d.account, currency);
+            }
+            return { account: d.account, env: d.env, lastIds: accLastIds };
+          })
+          .sort((a, b) => a.account.localeCompare(b.account));
+
         return {
           id: r.id,
           name: r.name,
@@ -176,6 +197,7 @@ export async function GET() {
           streams: { prod: prodStream, dev: devStream },
           lastIds,
           additionalLastIds,
+          dynamicAccounts,
         };
       })
     );

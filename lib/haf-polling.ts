@@ -9,6 +9,7 @@
 
 import { Transfer, RestaurantConfig } from '@/types';
 import { getAllAccounts } from './config';
+import { getDynamicAccounts } from './dynamic-accounts';
 import { getPollingState, updatePollingState, getLastIdFromState, buildLastIdUpdate, publishTransfer, wasRecentlyPublished, markPublished } from './redis';
 import { computeMinCursor } from './polling-state';
 import { computeDedupeKey } from './dedupe';
@@ -48,14 +49,24 @@ export async function pollAllTransfers(): Promise<Transfer[]> {
       console.warn(`[POLLING] Active source: ${activeSource.name}`);
     }
 
-    // Get ALL accounts (both prod and dev for all restaurants)
+    // Get ALL accounts: static config (Tier C, deploy-coupled) UNION the
+    // dynamic Redis watchlist (Farm vendors, registered at hatch without a
+    // redeploy — project_hatchery_vendor_hatching). Dynamic read soft-fails
+    // to [] so a Redis hiccup never stops the Tier C watchlist from polling.
     const accountConfigs = getAllAccounts();
+    const dynamicConfigs = await getDynamicAccounts();
     console.log(`[POLLING] getAllAccounts() returned:`, JSON.stringify(accountConfigs.map(c => ({ account: c.account, restaurant: c.restaurant.id, env: c.env }))));
+    if (dynamicConfigs.length > 0) {
+      console.log(`[POLLING] dynamic watchlist:`, JSON.stringify(dynamicConfigs.map(c => ({ account: c.account, restaurant: c.restaurant.id, env: c.env }))));
+    }
 
     const accountToContext = new Map<string, { restaurant: RestaurantConfig; env: 'prod' | 'dev' }>();
     const accountList: string[] = [];
 
-    for (const config of accountConfigs) {
+    // Static first; dynamic accounts are added only if not already present
+    // (a Tier C account in config always wins over a stray dynamic record).
+    for (const config of [...accountConfigs, ...dynamicConfigs]) {
+      if (accountToContext.has(config.account)) continue;
       accountToContext.set(config.account, {
         restaurant: config.restaurant,
         env: config.env

@@ -7,6 +7,12 @@ function parseAdditionalAccounts(envVar?: string): string[] {
   return (envVar || '').split(',').map(s => s.trim()).filter(Boolean);
 }
 
+// Historical reporting only: these accounts do not activate Redis order polling.
+// Move a future spoke into RESTAURANTS when its payment/CO integration is enabled.
+export const REPORTING_ONLY_ACCOUNTS = parseAdditionalAccounts(
+  process.env.REPORTING_ONLY_ACCOUNTS || 'al21-2025',
+);
+
 export const RESTAURANTS: RestaurantConfig[] = [
   {
     id: 'indies',

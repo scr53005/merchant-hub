@@ -12,7 +12,7 @@
 import { NextRequest } from 'next/server';
 import { Pool } from 'pg';
 import { handleCorsPreflight, corsResponse } from '@/lib/cors';
-import { RESTAURANTS } from '@/lib/config';
+import { RESTAURANTS, REPORTING_ONLY_ACCOUNTS } from '@/lib/config';
 
 const hafPool = new Pool({
   connectionString: process.env.HAF_CONNECTION_STRING,
@@ -21,7 +21,7 @@ const hafPool = new Pool({
 
 // Build set of all known accounts (primary + additional, prod + dev) for validation
 function getKnownAccounts(): Set<string> {
-  const accounts = new Set<string>();
+  const accounts = new Set<string>(REPORTING_ONLY_ACCOUNTS);
   for (const r of RESTAURANTS) {
     accounts.add(r.accounts.prod);
     accounts.add(r.accounts.dev);

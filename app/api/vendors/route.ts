@@ -10,7 +10,9 @@
 import { NextResponse } from 'next/server';
 import {
   registerDynamicAccount,
+  unregisterDynamicAccount,
   getDynamicAccountsRaw,
+  decodeAccountValue,
   validateRegistration,
 } from '@/lib/dynamic-accounts';
 
@@ -63,5 +65,31 @@ export async function GET(request: Request) {
     return NextResponse.json({ count: accounts.length, accounts });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+
+/** Stop watching an archived Farm vendor. Idempotent and scoped to innohatch. */
+export async function DELETE(request: Request) {
+  const denied = unauthorized(request);
+  if (denied) return denied;
+
+  const body = await request.json().catch(() => null);
+  const account = typeof body?.account === 'string' ? body.account : '';
+  if (!/^[a-z][a-z0-9.-]{2,15}$/.test(account)) {
+    return NextResponse.json({ error: 'Invalid account' }, { status: 400 });
+  }
+  try {
+    const raw = await getDynamicAccountsRaw();
+    const target = raw[account] ? decodeAccountValue(raw[account]) : null;
+    if (raw[account] && target?.restaurantId !== 'innohatch') {
+      return NextResponse.json({ error: 'Account belongs to a different spoke' }, { status: 409 });
+    }
+    if (raw[account]) await unregisterDynamicAccount(account);
+    console.warn(`[VENDORS] Unregistered archived Farm vendor ${account}`);
+    return NextResponse.json({ success: true, account });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[VENDORS] unregister failed:', message);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
